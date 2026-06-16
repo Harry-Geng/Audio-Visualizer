@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# OS / editor
+.DS_Store
+
+# Claude Code local (machine-specific permissions)
+.claude/settings.local.json
+
+# Ingest scratch
+_incoming/
+
+# ── Audio data: large + regenerable by re-ingesting, never commit ──
+*.flac
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.ogg
+*.aiff
+*.aif
+*_stems/
+*_stems_hq/
+*_features.json

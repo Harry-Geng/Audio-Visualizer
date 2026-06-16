@@ -1,0 +1,156 @@
+:root {
+  --bg: #0b0c10;
+  --panel: #14161d;
+  --line: #232733;
+  --text: #c8cdd8;
+  --dim: #6b7180;
+  --gutter: 84px;
+  --rowh: 88px;
+}
+
+* { box-sizing: border-box; }
+
+/* the `hidden` attribute must always win over author display rules below
+   (e.g. #drop-overlay/#live-view set display:flex, which would otherwise
+   override the browser's default [hidden]{display:none}) */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0; height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  overflow: hidden;
+}
+
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+header {
+  display: flex; align-items: center; gap: 14px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+header h1 { font-size: 13px; margin: 0; letter-spacing: 2px; color: #fff; font-weight: 600; }
+header .spacer { flex: 1; }
+select, button {
+  background: #1c1f29; color: var(--text);
+  border: 1px solid var(--line); border-radius: 5px;
+  padding: 5px 9px; font: inherit; cursor: pointer;
+}
+select { max-width: 320px; }
+button:hover { border-color: #3a4150; color: #fff; }
+button.on { background: #2a3550; border-color: #4a6; color: #fff; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; border-right: 1px solid var(--line); }
+.seg button:last-child { border-right: 0; }
+.readout { color: var(--dim); font-size: 12px; white-space: nowrap; }
+.readout b { color: var(--text); font-weight: 600; }
+
+.comp-wrap { position: relative; }
+.panel {
+  position: absolute; top: 36px; left: 0; z-index: 50;
+  background: #11131a; border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px; width: 260px; box-shadow: 0 12px 30px rgba(0,0,0,.5);
+}
+.panel .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.panel .presets button { padding: 3px 7px; font-size: 11px; }
+.panel .grp { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; }
+.panel label { display: flex; align-items: center; gap: 7px; padding: 3px 4px; cursor: pointer; border-radius: 4px; }
+.panel label:hover { background: #1a1d27; }
+.panel label.child { padding-left: 20px; color: var(--dim); }
+.panel .sw { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 auto; }
+
+/* add-music panel */
+#add-panel { width: 280px; }
+#dropzone {
+  border: 1.5px dashed #3a4150; border-radius: 8px; padding: 18px 10px;
+  text-align: center; color: var(--dim); line-height: 1.7;
+}
+#dropzone.hot { border-color: #4caf50; color: #fff; background: #18271a; }
+#dropzone span { font-size: 10px; color: #555b68; }
+#add-panel .or { text-align: center; color: var(--dim); font-size: 11px; margin: 9px 0 7px; }
+#add-panel .urlrow { display: flex; gap: 6px; }
+#add-panel .urlrow input { flex: 1; min-width: 0; background: #1c1f29; color: var(--text);
+  border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; font: inherit; }
+#add-panel .hqvox { display: flex; align-items: center; gap: 7px; margin-top: 10px; font-size: 12px; color: var(--text); cursor: pointer; }
+#add-panel .hqvox span { color: var(--dim); font-size: 10px; }
+#add-panel .hint { color: var(--dim); font-size: 10px; margin-top: 8px; }
+
+/* job toasts */
+#jobs { position: absolute; top: 50px; right: 14px; z-index: 60; display: flex; flex-direction: column; gap: 8px; }
+.job {
+  background: #14161d; border: 1px solid var(--line); border-left: 3px solid #d8a13a;
+  border-radius: 7px; padding: 9px 12px; width: 300px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+}
+.job.done { border-left-color: #4caf50; }
+.job.error { border-left-color: #e05050; }
+.job .t { color: #fff; font-size: 12px; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job .m { color: var(--dim); font-size: 11px; }
+.job .bar { height: 3px; background: #232733; border-radius: 2px; margin-top: 6px; overflow: hidden; }
+.job .bar i { display: block; height: 100%; background: #d8a13a; width: 30%; animation: slide 1.3s ease-in-out infinite; }
+.job .bar.determinate i { animation: none; margin-left: 0; transition: width .4s ease; }
+.job.done .bar, .job.error .bar { display: none; }
+@keyframes slide { 0%{margin-left:-30%} 100%{margin-left:100%} }
+
+/* live mode */
+#live-view { flex: 1; display: flex; flex-direction: column; min-height: 0; background: #06070a; }
+.live-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.live-bar select { max-width: 260px; }
+.live-meter { width: 120px; height: 8px; background: #232733; border-radius: 4px; overflow: hidden; }
+#live-level { height: 100%; width: 0%; background: linear-gradient(90deg,#2ecc71,#f1c40f,#e74c3c); transition: width .05s; }
+#live-help { padding: 12px 16px; color: var(--text); font-size: 12px; background: #0e1014; border-bottom: 1px solid var(--line); }
+#live-help ol { margin: 6px 0 0; padding-left: 20px; line-height: 1.7; color: var(--dim); }
+#live-canvas { flex: 1; width: 100%; min-height: 0; display: block; }
+body.live #scroll, body.live #ruler-wrap { display: none; }
+
+/* drop overlay — pointer-events:none so it can never trap clicks even if shown */
+#drop-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(6,7,10,.85);
+  display: flex; align-items: center; justify-content: center; pointer-events: none; }
+#drop-overlay div { border: 3px dashed #4caf50; border-radius: 16px; padding: 60px 90px;
+  font-size: 22px; color: #fff; }
+
+#ruler-wrap { flex: 0 0 auto; display: flex; background: var(--panel); border-bottom: 1px solid var(--line); }
+#ruler-gutter { width: var(--gutter); flex: 0 0 auto; border-right: 1px solid var(--line); }
+#ruler { flex: 1; height: 26px; display: block; }
+
+#scroll { position: relative; flex: 1; overflow-y: auto; overflow-x: hidden; }
+#tracks { position: relative; }
+
+.row {
+  display: flex; height: var(--rowh);
+  border-bottom: 1px solid var(--line);
+}
+.row .label {
+  width: var(--gutter); flex: 0 0 auto;
+  border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; justify-content: center;
+  padding-left: 10px; gap: 3px;
+  background: var(--panel);
+}
+.row .label .nm { color: #fff; font-weight: 600; }
+.row .label .nm.child { font-weight: 400; color: var(--dim); padding-left: 10px; }
+.row .label .tag { color: var(--dim); font-size: 10px; }
+.row .label .sm { display: flex; gap: 4px; margin-top: 2px; }
+.row .label .sm button {
+  width: 19px; height: 17px; padding: 0; font-size: 10px; line-height: 1;
+  border-radius: 3px; color: var(--dim);
+}
+.row .label .sm button.solo.on { background: #2e7d32; border-color: #4caf50; color: #fff; }
+.row .label .sm button.mute.on { background: #b03030; border-color: #e05050; color: #fff; }
+.row.dim canvas { opacity: .35; }
+.row .cv { flex: 1; position: relative; }
+.row canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+#overlay-wrap { position: absolute; inset: 0; pointer-events: none; left: var(--gutter); }
+#overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+#playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: #ff3b6b; box-shadow: 0 0 6px #ff3b6b; display: none; }
+#cursor { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,.25); display: none; }
+
+footer {
+  flex: 0 0 auto; padding: 4px 12px; color: var(--dim); font-size: 11px;
+  background: var(--panel); border-top: 1px solid var(--line);
+}
+kbd { background:#1c1f29; border:1px solid var(--line); border-radius:3px; padding:0 4px; color:var(--text); }

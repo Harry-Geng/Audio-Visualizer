@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Music Microscope</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>♪ MICROSCOPE</h1>
+    <select id="song"></select>
+    <div class="seg" id="mode">
+      <button data-mode="wave" class="on">wave</button>
+      <button data-mode="spec">spectro</button>
+      <button data-mode="both">both</button>
+    </div>
+    <button id="play">▶ play</button>
+    <button id="zoomout">－</button>
+    <button id="zoomin">＋</button>
+    <button id="fit">⤢ fit</button>
+    <div class="comp-wrap">
+      <button id="comp-btn">◫ components</button>
+      <div id="comp-panel" class="panel" hidden></div>
+    </div>
+    <div class="comp-wrap">
+      <button id="add-btn">＋ add music</button>
+      <div id="add-panel" class="panel" hidden>
+        <div id="dropzone">⤓ drop an audio file here<br><span>mp3 · flac · wav · m4a</span></div>
+        <div class="or">— or paste a link —</div>
+        <div class="urlrow">
+          <input id="url-input" type="text" placeholder="YouTube / SoundCloud URL">
+          <button id="url-go">fetch</button>
+        </div>
+        <label class="hqvox"><input type="checkbox" id="hq-vocals" checked>
+          ✨ HQ vocals (BS-Roformer) <span>— cleaner + cascades drums/bass/other</span></label>
+        <label class="hqvox"><input type="checkbox" id="drum-kit" checked>
+          🥁 drum kit (DrumSep) <span>— real kick/snare/toms/hh/ride/crash, +~25s</span></label>
+        <div class="hint">URL audio is lossy (~160 kbps). Files keep full quality.</div>
+      </div>
+    </div>
+    <button id="live-btn">● live</button>
+    <div class="spacer"></div>
+    <div class="readout" id="readout"></div>
+  </header>
+  <div id="jobs"></div>
+
+  <div id="ruler-wrap">
+    <div id="ruler-gutter"></div>
+    <canvas id="ruler"></canvas>
+  </div>
+
+  <div id="scroll">
+    <div id="tracks"></div>
+    <div id="overlay-wrap">
+      <canvas id="overlay"></canvas>
+      <div id="cursor"></div>
+      <div id="playhead"></div>
+    </div>
+  </div>
+
+  <div id="live-view" hidden>
+    <div class="live-bar">
+      <span>input:</span>
+      <select id="live-device"></select>
+      <button id="live-start">▶ start capture</button>
+      <button id="live-stop" hidden>■ stop</button>
+      <div class="live-meter"><div id="live-level"></div></div>
+      <div class="spacer"></div>
+      <button id="live-help-btn">? routing Spotify</button>
+    </div>
+    <div id="live-help" hidden>
+      <b>Route Spotify (or any app) into the visualizer:</b>
+      <ol>
+        <li>Open <b>Audio MIDI Setup</b> → create a <b>Multi-Output Device</b> with your speakers + <b>BlackHole 2ch</b> (so you still hear it).</li>
+        <li>macOS <b>Sound → Output</b> → select that Multi-Output Device.</li>
+        <li>Here, pick <b>BlackHole 2ch</b> as input and hit start.</li>
+      </ol>
+    </div>
+    <canvas id="live-canvas"></canvas>
+  </div>
+
+  <div id="drop-overlay" hidden><div>⤓ drop to analyze</div></div>
+
+  <footer>
+    <kbd>pinch</kbd> or <kbd>⌘/ctrl+scroll</kbd> = zoom &nbsp;·&nbsp;
+    <kbd>two-finger swipe</kbd> or <kbd>drag</kbd> = pan &nbsp;·&nbsp;
+    <kbd>click</kbd> = seek &nbsp;·&nbsp; <kbd>space</kbd> = play/pause &nbsp;·&nbsp;
+    <b>S</b>/<b>M</b> = solo/mute &nbsp;·&nbsp; zoom in to read individual waveform cycles
+  </footer>
+</div>
+<audio id="audio" preload="auto"></audio>
+<script src="/static/app.js"></script>
+</body>
+</html>
