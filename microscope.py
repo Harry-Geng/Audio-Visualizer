@@ -517,6 +517,7 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         hq = q.get("hq", ["0"])[0] == "1"
         drums = q.get("drums", ["0"])[0] == "1"
+        six = q.get("six", ["0"])[0] == "1"
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = self._read_exact(length)
@@ -526,7 +527,7 @@ class Handler(BaseHTTPRequestHandler):
                 url = (data.get("url") or "").strip()
                 if not url:
                     return self._json({"error": "no url"}, 400)
-                return self._json(ingest.start_url_job(url, hq_vocals=hq, drum_kit=drums))
+                return self._json(ingest.start_url_job(url, hq_vocals=hq, drum_kit=drums, six_stem=six))
 
             if u.path == "/api/ingest_file":
                 fname = os.path.basename(self.headers.get("X-Filename", "upload"))
@@ -538,7 +539,7 @@ class Handler(BaseHTTPRequestHandler):
                 with open(dest, "wb") as f:
                     f.write(body)
                 title = os.path.splitext(fname)[0]
-                return self._json(ingest.start_file_job(dest, title, hq_vocals=hq, drum_kit=drums))
+                return self._json(ingest.start_file_job(dest, title, hq_vocals=hq, drum_kit=drums, six_stem=six))
 
             return self._json({"error": "not found"}, 404)
         except (KeyError, ValueError) as e:

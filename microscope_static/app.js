@@ -7,6 +7,8 @@ const GROUP_COLOR = {
   bass:   [52,  152, 219],
   vocals: [46,  204, 113],
   other:  [243, 156, 18],
+  guitar: [155, 89,  182],
+  piano:  [26,  188, 156],
 };
 function trackColor(t) {
   const c = GROUP_COLOR[t.group] || [180, 180, 180];
@@ -23,6 +25,9 @@ const S = {
   mode: "wave",
   rows: [],            // every track (visible or not)
   visible: new Set(),
+  collapsed: new Set(),  // parent group ids whose children are hidden
+  show: { sections: true, beats: true, phrases: true },  // overlay marker toggles
+  lock: false,         // scroll-lock: keep playhead centered while playing
   renderId: 0,
   _info: "",
 };
@@ -30,11 +35,12 @@ const S = {
 const $ = s => document.querySelector(s);
 const els = {
   song: $("#song"), mode: $("#mode"), play: $("#play"), fit: $("#fit"),
-  zin: $("#zoomin"), zout: $("#zoomout"),
+  zin: $("#zoomin"), zout: $("#zoomout"), lock: $("#lock-btn"),
   compBtn: $("#comp-btn"), compPanel: $("#comp-panel"),
+  resetSm: $("#reset-sm"), toggleSub: $("#toggle-sub"),
   readout: $("#readout"), ruler: $("#ruler"), tracks: $("#tracks"),
-  overlay: $("#overlay"), playhead: $("#playhead"), cursor: $("#cursor"),
-  scroll: $("#scroll"),
+  overlay: $("#overlay"), overlayWrap: $("#overlay-wrap"),
+  playhead: $("#playhead"), cursor: $("#cursor"), scroll: $("#scroll"),
   addBtn: $("#add-btn"), addPanel: $("#add-panel"), dropzone: $("#dropzone"),
   urlInput: $("#url-input"), urlGo: $("#url-go"), jobs: $("#jobs"),
   dropOverlay: $("#drop-overlay"),
@@ -50,6 +56,16 @@ const fmtTime = s => {
   return `${m}:${sec.toFixed(s < 10 && m === 0 ? 3 : 2).padStart(s < 10 ? 6 : 5, "0")}`;
 };
 function debounce(fn, ms) { let h; return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); }; }
+// throttle: fires on the leading edge and at most once per `ms`, plus a trailing
+// call — so continuous motion (e.g. scroll-lock) keeps refreshing instead of starving.
+function throttle(fn, ms) {
+  let last = 0, timer = null, lastArgs;
+  return (...a) => {
+    lastArgs = a; const now = Date.now(), wait = ms - (now - last);
+    if (wait <= 0) { last = now; fn(...a); }
+    else if (!timer) timer = setTimeout(() => { last = Date.now(); timer = null; fn(...lastArgs); }, wait);
+  };
+}
 
 // ==========================================================================
 // init
@@ -66,7 +82,28 @@ async function init() {
     requestRender(true);
   });
   els.play.onclick = () => Transport.toggle();
+  els.resetSm.onclick = () => {                 // clear all solo/mute → back to full mix
+    S.rows.forEach(r => { r.solo = false; r.mute = false; });
+    syncRowBtns(); Transport.refresh();
+  };
+  els.toggleSub.onclick = () => {               // collapse/expand ALL groups at once
+    const groups = groupsWithChildren();
+    const allCollapsed = groups.every(g => S.collapsed.has(g));
+    groups.forEach(g => setGroupCollapsed(g, !allCollapsed));
+    updateCarets();
+    applyVisibility();
+  };
   els.fit.onclick = () => setView(0, S.meta.duration);
+  els.lock.onclick = () => {
+    S.lock = !S.lock;
+    els.lock.classList.toggle("on", S.lock);
+    if (S.lock) centerOnPlayhead();          // snap to center right away
+  };
+  document.querySelectorAll("#legend .lg").forEach(b => b.onclick = () => {
+    S.show[b.dataset.k] = !S.show[b.dataset.k];
+    b.classList.toggle("on", S.show[b.dataset.k]);
+    drawOverlay();
+  });
   els.zin.onclick = () => zoomBy(0.5);
   els.zout.onclick = () => zoomBy(2);
   els.compBtn.onclick = () => els.compPanel.hidden = !els.compPanel.hidden;
@@ -105,14 +142,50 @@ async function loadSong(id) {
   if (pb.lossy) q += " (lossy src)";
   if (pb.hq_vocals) q += " · ✨HQ vox";
   if (pb.drum_kit) q += " · 🥁kit";
+  if (S.meta.tracks.some(t => t.id === "guitar" || t.id === "piano")) q += " · 🎸6-stem";
   S._info = [f.tempo ? Math.round(f.tempo) + " bpm" : "", keyName, q].filter(Boolean).join(" · ");
 
   S.visible = new Set(S.meta.tracks.map(t => t.id));   // all on by default
+  applyCollapse();                                     // honor collapsed groups
   buildRows();
   buildCompPanel();
   Transport.reset();
   applyVisibility();
   setView(0, S.meta.duration);
+}
+
+// groups (parent stems) that actually have sub-components in this song
+function groupsWithChildren() {
+  const set = new Set();
+  for (const t of (S.meta?.tracks || [])) if (t.depth === 1) set.add(t.group);
+  return [...set];
+}
+function applyCollapse() {                              // remove hidden children from visible
+  for (const t of S.meta.tracks) {
+    if (t.depth === 1 && S.collapsed.has(t.group)) S.visible.delete(t.id);
+  }
+}
+function setGroupCollapsed(g, collapsed) {
+  collapsed ? S.collapsed.add(g) : S.collapsed.delete(g);
+  for (const t of S.meta.tracks) {
+    if (t.depth === 1 && t.group === g) collapsed ? S.visible.delete(t.id) : S.visible.add(t.id);
+  }
+}
+function updateCarets() {
+  for (const r of S.rows) {
+    const cb = r.el.querySelector(".caret");
+    if (cb) cb.textContent = S.collapsed.has(r.track.id) ? "▸" : "▾";
+  }
+  const groups = groupsWithChildren();
+  const allCollapsed = groups.length && groups.every(g => S.collapsed.has(g));
+  els.toggleSub.textContent = allCollapsed ? "▸ show sub" : "▾ hide sub";
+  els.toggleSub.classList.toggle("on", allCollapsed);
+  els.compPanel.querySelectorAll("input").forEach(cb => cb.checked = S.visible.has(cb.dataset.id));
+}
+function toggleGroup(g) {
+  setGroupCollapsed(g, !S.collapsed.has(g));
+  updateCarets();
+  applyVisibility();
 }
 const keyLabel = (k, mode) =>
   ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][k] + (mode ? " maj" : " min");
@@ -125,11 +198,15 @@ function buildRows() {
   S.rows = [];
   for (const t of S.meta.tracks) {
     const c = trackColor(t);
+    const hasKids = t.depth === 0 && S.meta.tracks.some(x => x.depth === 1 && x.group === t.id);
+    const caret = hasKids
+      ? `<button class="caret" title="collapse/expand sub-components">${S.collapsed.has(t.id) ? "▸" : "▾"}</button>`
+      : "";
     const row = document.createElement("div");
     row.className = "row";
     row.innerHTML =
       `<div class="label">
-         <div class="nm ${t.depth ? "child" : ""}" style="color:${t.depth ? rgb(c) : "#fff"}">${t.label}</div>
+         <div class="nm ${t.depth ? "child" : ""}" style="color:${rgb(c)}">${caret}${t.label}</div>
          <div class="sm">
            <button class="solo" title="solo (hear only this)">S</button>
            <button class="mute" title="mute">M</button>
@@ -144,6 +221,8 @@ function buildRows() {
     };
     row.querySelector(".solo").onclick = () => { r.solo = !r.solo; syncRowBtns(); Transport.refresh(); };
     row.querySelector(".mute").onclick = () => { r.mute = !r.mute; syncRowBtns(); Transport.refresh(); };
+    const cb = row.querySelector(".caret");
+    if (cb) cb.onclick = e => { e.stopPropagation(); toggleGroup(t.id); };
     S.rows.push(r);
   }
 }
@@ -216,6 +295,7 @@ function sizeOverlay() {
   const gutter = gutterPx();
   const w = Math.max(1, els.tracks.clientWidth - gutter);
   const h = Math.max(1, els.tracks.offsetHeight);
+  els.overlayWrap.style.height = h + "px";       // span all rows + scroll with them
   els.overlay.style.height = h + "px";
   els.overlay.width = Math.round(w * DPR());
   els.overlay.height = Math.round(h * DPR());
@@ -236,6 +316,11 @@ function setView(start, end) {
   S.view = { start, end: start + span };
   requestRender();
 }
+function centerOnPlayhead() {
+  if (!S.meta) return;
+  const t = Transport.curTime(), span = S.view.end - S.view.start;
+  setView(t - span / 2, t + span / 2);
+}
 function zoomBy(factor, pivotT) {
   const span0 = S.view.end - S.view.start;
   const span = clamp(span0 * factor, 80 / S.meta.sr, S.meta.duration);
@@ -254,7 +339,7 @@ function requestRender(force) {
   for (const r of S.rows) if (S.visible.has(r.track.id)) fastDraw(r);
   refetch(force);
 }
-const refetch = debounce(_refetch, 110);
+const refetch = throttle(_refetch, 120);
 function _refetch(force) {
   const id = ++S.renderId;
   for (const r of S.rows) if (S.visible.has(r.track.id)) fetchRow(r, id, force);
@@ -368,19 +453,21 @@ function drawOverlay() {
   const w = c.width / dpr, h = c.height / dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
   const f = S.meta.features || {}, span = S.view.end - S.view.start;
-  const secs = f.sections || [];
-  for (let i = 0; i < secs.length; i++) {
-    const x0 = timeToX(secs[i], w), x1 = i + 1 < secs.length ? timeToX(secs[i + 1], w) : w;
-    if (x1 < 0 || x0 > w) continue;
-    ctx.fillStyle = `hsla(${(i * 47) % 360},60%,55%,0.07)`; ctx.fillRect(x0, 0, x1 - x0, h);
-    ctx.strokeStyle = "rgba(255,255,255,.18)";
-    ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0, h); ctx.stroke();
-    if (f.section_labels?.[i]) {
-      ctx.fillStyle = "rgba(255,255,255,.5)"; ctx.font = "11px ui-monospace, monospace";
-      ctx.fillText(f.section_labels[i], x0 + 4, 13);
+  if (S.show.sections) {
+    const secs = f.sections || [];
+    for (let i = 0; i < secs.length; i++) {
+      const x0 = timeToX(secs[i], w), x1 = i + 1 < secs.length ? timeToX(secs[i + 1], w) : w;
+      if (x1 < 0 || x0 > w) continue;
+      ctx.fillStyle = `hsla(${(i * 47) % 360},60%,55%,0.07)`; ctx.fillRect(x0, 0, x1 - x0, h);
+      ctx.strokeStyle = "rgba(255,255,255,.18)";
+      ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0, h); ctx.stroke();
+      if (f.section_labels?.[i]) {
+        ctx.fillStyle = "rgba(255,255,255,.5)"; ctx.font = "11px ui-monospace, monospace";
+        ctx.fillText(f.section_labels[i], x0 + 4, 13);
+      }
     }
   }
-  if ((f.beats || []).length && span < 40) {
+  if (S.show.beats && (f.beats || []).length && span < 40) {
     ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.beginPath();
     for (const b of f.beats) {
       if (b < S.view.start || b > S.view.end) continue;
@@ -388,11 +475,13 @@ function drawOverlay() {
     }
     ctx.stroke();
   }
-  for (const p of (f.phrases || [])) {
-    if (p < S.view.start || p > S.view.end) continue;
-    const x = timeToX(p, w);
-    ctx.strokeStyle = "rgba(120,200,255,.35)"; ctx.setLineDash([3, 4]);
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); ctx.setLineDash([]);
+  if (S.show.phrases) {
+    for (const p of (f.phrases || [])) {
+      if (p < S.view.start || p > S.view.end) continue;
+      const x = timeToX(p, w);
+      ctx.strokeStyle = "rgba(120,200,255,.35)"; ctx.setLineDash([3, 4]);
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); ctx.setLineDash([]);
+    }
   }
 }
 function niceStep(span, ticks) {
@@ -411,16 +500,20 @@ function setupInteractions() {
 
   area.addEventListener("wheel", e => {
     if (!S.meta) return;
-    e.preventDefault();
-    const w = vw(), x = clamp(localX(e.clientX), 0, w);
+    const w = vw();
     if (e.ctrlKey || e.metaKey) {                       // pinch / cmd+scroll = zoom
-      zoomBy(Math.exp(clamp(e.deltaY, -40, 40) * 0.01), xToTime(x, w));
-    } else {                                            // swipe = pan
+      e.preventDefault();
+      zoomBy(Math.exp(clamp(e.deltaY, -40, 40) * 0.01), xToTime(clamp(localX(e.clientX), 0, w), w));
+    } else if (e.shiftKey) {                            // shift+scroll = pan time
+      e.preventDefault();
       const span = S.view.end - S.view.start;
-      const dom = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-      const d = dom / w * span;
-      setView(S.view.start + d, S.view.end + d);
+      setView(S.view.start + e.deltaY / w * span, S.view.end + e.deltaY / w * span);
+    } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {  // horizontal swipe = pan time
+      e.preventDefault();
+      const span = S.view.end - S.view.start;
+      setView(S.view.start + e.deltaX / w * span, S.view.end + e.deltaX / w * span);
     }
+    // else: vertical wheel → let the browser scroll the track list (no preventDefault)
   }, { passive: false });
 
   let dragging = false, lastX = 0, moved = 0;
@@ -467,6 +560,7 @@ function setupInteractions() {
 const Transport = {
   ac: null, master: null, buffers: new Map(), loading: new Map(),
   sources: [], playing: false, offset: 0, startedAt: 0, activeKey: "",
+  analysers: {}, sceneMode: false, _td: null, _fd: null,
 
   init() {
     this.ac = new (window.AudioContext || window.webkitAudioContext)();
@@ -492,7 +586,7 @@ const Transport = {
       rows.forEach(r => { if (r.track.id !== "mix") dim.add(r.track.id); });
       return { play: ["full"], dim };
     }
-    const groups = STEMS.filter(s => byId(s));
+    const groups = rows.filter(r => r.track.depth === 0 && r.track.id !== "mix").map(r => r.track.id);
     const kidsOf = g => rows.filter(r => r.track.group === g && r.track.depth === 1).map(r => r.track.id);
     const soloExists = rows.some(r => r.solo && r.track.id !== "mix");
 
@@ -543,16 +637,89 @@ const Transport = {
 
   async startSources() {
     this.stopSources();
-    const ids = this.resolve().play; this.activeKey = ids.join(",");
+    this.analysers = {};
     const off = this.offset;
+
+    if (this.sceneMode && typeof Scene !== "undefined" && Scene.allInstrumentIds) {
+      // Audio = full-quality original (unless soloing/muting); per-instrument
+      // stems play SILENTLY into analysers so the visuals stay reactive.
+      const instIds = Scene.allInstrumentIds();
+      const aud = Scene.audibleSet();              // "FULL" or Set of audible ids
+      const playFull = aud === "FULL";
+      const loadIds = playFull ? ["full", ...instIds] : instIds;
+      const key = "scene:" + loadIds.join(",");
+      this.activeKey = key;
+      const bufs = await Promise.all(loadIds.map(id => this.load(id)));
+      if (!this.playing || this.activeKey !== key) return;
+      let k = 0;
+      if (playFull) {
+        const buf = bufs[k++];
+        if (buf) { const s = this.ac.createBufferSource(); s.buffer = buf; s.connect(this.master); s.start(0, Math.min(off, buf.duration)); this.sources.push(s); }
+      }
+      for (const id of instIds) {
+        const buf = bufs[k++]; if (!buf) continue;
+        const src = this.ac.createBufferSource(); src.buffer = buf;
+        const an = this.ac.createAnalyser(); an.fftSize = 2048; an.smoothingTimeConstant = 0.6;
+        const g = this.ac.createGain(); g.gain.value = (!playFull && aud.has(id)) ? 1 : 0;
+        src.connect(an); an.connect(g); g.connect(this.master);
+        this.analysers[id] = an;
+        src.start(0, Math.min(off, buf.duration)); this.sources.push(src);
+      }
+      return;
+    }
+
+    const ids = this.resolve().play; this.activeKey = ids.join(",");
     const bufs = await Promise.all(ids.map(id => this.load(id)));
     if (!this.playing || this.activeKey !== ids.join(",")) return;
-    for (const buf of bufs) {
-      if (!buf) continue;
-      const src = this.ac.createBufferSource();
-      src.buffer = buf; src.connect(this.master); src.start(0, Math.min(off, buf.duration));
+    for (let i = 0; i < ids.length; i++) {
+      const buf = bufs[i]; if (!buf) continue;
+      const src = this.ac.createBufferSource(); src.buffer = buf;
+      src.connect(this.master); src.start(0, Math.min(off, buf.duration));
       this.sources.push(src);
     }
+  },
+
+  // scene mode plays each base instrument separately (so each gets an analyser)
+  sceneIds() {
+    const base = S.rows.filter(r => r.track.depth === 0 && r.track.id !== "mix").map(r => r.track.id);
+    const solo = base.filter(id => S.rows.find(r => r.track.id === id).solo);
+    const mute = new Set(base.filter(id => S.rows.find(r => r.track.id === id).mute));
+    return solo.length ? solo : base.filter(id => !mute.has(id));
+  },
+  level(id) {                               // RMS amplitude 0..~1 for one instrument
+    const a = this.analysers[id]; if (!a) return 0;
+    const buf = this._td || (this._td = new Uint8Array(2048));
+    a.getByteTimeDomainData(buf);
+    let s = 0; for (let i = 0; i < buf.length; i++) { const x = (buf[i] - 128) / 128; s += x * x; }
+    return Math.sqrt(s / buf.length);
+  },
+  bands(id) {                               // [low, mid, high] energy 0..1
+    const a = this.analysers[id]; if (!a) return [0, 0, 0];
+    const buf = this._fd || (this._fd = new Uint8Array(1024));
+    a.getByteFrequencyData(buf);
+    const t = Math.floor(buf.length / 3), avg = (s, e) => {
+      let m = 0; for (let i = s; i < e; i++) m += buf[i]; return m / (e - s) / 255;
+    };
+    return [avg(0, t), avg(t, 2 * t), avg(2 * t, buf.length)];
+  },
+  pitchHz(id) {                             // monophonic fundamental via autocorrelation
+    const a = this.analysers[id]; if (!a) return 0;
+    const N = a.fftSize, b = this._pf && this._pf.length === N ? this._pf : (this._pf = new Float32Array(N));
+    a.getFloatTimeDomainData(b);
+    let rms = 0; for (let i = 0; i < N; i++) rms += b[i] * b[i]; rms = Math.sqrt(rms / N);
+    if (rms < 0.012) return 0;
+    const sr = this.ac.sampleRate, W = 512;
+    const minLag = Math.floor(sr / 320), maxLag = Math.min(N - W - 1, Math.floor(sr / 50));
+    let best = -1, bestv = 1e-9;
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let s = 0; for (let i = 0; i < W; i++) s += b[i] * b[i + lag];
+      if (s > bestv) { bestv = s; best = lag; }
+    }
+    return best > 0 ? sr / best : 0;
+  },
+  setSceneMode(on) {
+    this.sceneMode = on;
+    if (this.playing) { this.offset = this.curTime(); this.startedAt = this.ac.currentTime; this.startSources(); }
   },
 
   async toggle() {
@@ -572,6 +739,7 @@ const Transport = {
   seek(t) {
     this.offset = clamp(t, 0, S.meta.duration - 0.01);
     if (this.playing) { this.startedAt = this.ac.currentTime; this.startSources(); }
+    if (S.lock) centerOnPlayhead();
     this.drawPlayhead();
   },
   refresh() {                                  // solo/mute changed
@@ -591,8 +759,10 @@ const Transport = {
       if (this.playing) {
         const t = this.curTime(), span = S.view.end - S.view.start;
         if (t >= S.meta.duration - 0.02) this.pause();
+        else if (S.lock)                                  // scroll lock: keep centered
+          setView(t - span / 2, t + span / 2);
         else if (span < S.meta.duration * 0.9 && (t > S.view.end - span * 0.08 || t < S.view.start))
-          setView(t - span * 0.5, t + span * 0.5);
+          setView(t - span * 0.5, t + span * 0.5);        // jump-follow
       }
     }
     requestAnimationFrame(() => this.tick());
@@ -647,7 +817,8 @@ const Ingest = {
   ingestQuery() {
     const hq = document.querySelector("#hq-vocals")?.checked ? 1 : 0;
     const drums = document.querySelector("#drum-kit")?.checked ? 1 : 0;
-    return `?hq=${hq}&drums=${drums}`;
+    const six = document.querySelector("#six-stem")?.checked ? 1 : 0;
+    return `?hq=${hq}&drums=${drums}&six=${six}`;
   },
 
   async uploadFile(file) {

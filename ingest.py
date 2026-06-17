@@ -62,8 +62,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 _JOBS = {}
 _JOBS_LOCK = threading.Lock()
 _WORKER_LOCK = threading.Lock()      # serialize heavy work
-_MODEL = None
+_MODELS = {}                         # name -> loaded demucs model
 _MODEL_LOCK = threading.Lock()
+DEMUCS_6S_MODEL = "htdemucs_6s"      # adds guitar + piano (piano is weak)
 
 # called by microscope.py after a song finishes so the server can serve it
 on_song_ready = None                 # fn(song_id, stems_dir)
@@ -114,18 +115,19 @@ def _slugify_id(title):
     return cand
 
 
-def _load_model():
-    global _MODEL
+def _load_model(name=DEMUCS_MODEL):
     with _MODEL_LOCK:
-        if _MODEL is None:
-            _MODEL = get_model(DEMUCS_MODEL)
-            _MODEL.eval()
-        return _MODEL
+        m = _MODELS.get(name)
+        if m is None:
+            m = get_model(name)
+            m.eval()
+            _MODELS[name] = m
+        return m
 
 
-def _separate_hq(path):
+def _separate_hq(path, model_name=DEMUCS_MODEL):
     """Return ({stem: stereo float32 [n,2]}, sr) at the model's native rate."""
-    model = _load_model()
+    model = _load_model(model_name)
     wav, sr = torchaudio.load(path)
     if sr != model.samplerate:
         wav = torchaudio.functional.resample(wav, sr, model.samplerate)
@@ -262,7 +264,7 @@ def _download_url(url, job, tmpdir):
 # ---------------------------------------------------------------------------
 # pipeline
 # ---------------------------------------------------------------------------
-def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False):
+def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False, six_stem=False):
     tmpdir = tempfile.mkdtemp(prefix="microscope_")
     try:
         with _WORKER_LOCK:
@@ -283,6 +285,7 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False):
 
             use_hq_voc = hq_vocals and separator_available()
             use_drumsep = drum_kit and separator_available()
+            demucs_model = DEMUCS_6S_MODEL if six_stem else DEMUCS_MODEL
 
             # 2. Vocal isolation + cascade: when HQ vocals are on, run BS-Roformer
             #    first (vocals + instrumental), then run htdemucs on the *instrumental*
@@ -302,13 +305,16 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False):
             else:
                 demucs_src = src_path
 
-            # 2b. htdemucs for drums/bass/other (+ vocals we may discard)
+            # 2b. htdemucs for drums/bass/other (+ vocals we may discard). With
+            #     6-stem, this also yields guitar + piano.
             sep_base = job.progress or 0
             sep_top = 70 if use_drumsep else 86
-            _set(job, "separating", "separating stems with Demucs (a few minutes)…")
+            msg = "separating 6 stems (Demucs 6s)…" if six_stem \
+                else "separating stems with Demucs (a few minutes)…"
+            _set(job, "separating", msg)
             _prog.update(job=job, base=sep_base, span=sep_top - sep_base)
             try:
-                stems_hq, sr_hq = _separate_hq(demucs_src)
+                stems_hq, sr_hq = _separate_hq(demucs_src, demucs_model)
             finally:
                 _prog.update(job=None, base=0, span=0)
             job.progress = sep_top
@@ -347,18 +353,20 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False):
                 sf.write(os.path.join(an_dir, f"{name}.wav"), mono, SR, subtype="PCM_16")
                 return mono
 
+            # base stems = the 4 standard + any extras from 6-stem (guitar/piano)
+            base_names = list(STEM_NAMES) + [n for n in stems_hq if n not in STEM_NAMES]
             analysis = {}
-            for name in STEM_NAMES:                 # base stems feed feature extraction
+            for name in base_names:
                 analysis[name] = _save(name, stems_hq[name])
             for name, arr in drum_parts.items():     # DrumSep kit parts (waveforms only)
                 _save(name, arr)
 
-            # 3. features
+            # 3. features (per-stem on the standard 4; mix = sum of all base stems)
             job.progress = 90
             _set(job, "features", "extracting features…")
             n = min(len(a) for a in analysis.values())
             analysis = {k: v[:n] for k, v in analysis.items()}
-            mix = sum(analysis.values()).astype(np.float32)
+            mix = sum(analysis[k] for k in base_names).astype(np.float32)
             feats = extract_all(analysis, mix)
             feats["meta"] = {
                 "filename": f"{song_id}.flac",
@@ -367,7 +375,7 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False):
                 "fps": round(FPS, 6),
                 "n_frames": len(feats["macro"]["energy_envelope"]),
                 "processed_at": "", "lossy_source": job.lossy,
-                "hq_vocals": use_hq_voc, "drum_kit": use_drumsep,
+                "hq_vocals": use_hq_voc, "drum_kit": use_drumsep, "six_stem": six_stem,
             }
             write_features(feats, orig_dest)
 
@@ -383,22 +391,24 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def start_file_job(src_path, title, hq_vocals=False, drum_kit=False):
+def start_file_job(src_path, title, hq_vocals=False, drum_kit=False, six_stem=False):
     job = Job("file")
     job.title = title
     with _JOBS_LOCK:
         _JOBS[job.id] = job
     threading.Thread(target=_run, daemon=True, kwargs={
-        "job": job, "src_path": src_path, "hq_vocals": hq_vocals, "drum_kit": drum_kit,
+        "job": job, "src_path": src_path, "hq_vocals": hq_vocals,
+        "drum_kit": drum_kit, "six_stem": six_stem,
     }).start()
     return job.as_dict()
 
 
-def start_url_job(url, hq_vocals=False, drum_kit=False):
+def start_url_job(url, hq_vocals=False, drum_kit=False, six_stem=False):
     job = Job("url")
     with _JOBS_LOCK:
         _JOBS[job.id] = job
     threading.Thread(target=_run, daemon=True, kwargs={
-        "job": job, "url": url, "hq_vocals": hq_vocals, "drum_kit": drum_kit,
+        "job": job, "url": url, "hq_vocals": hq_vocals,
+        "drum_kit": drum_kit, "six_stem": six_stem,
     }).start()
     return job.as_dict()

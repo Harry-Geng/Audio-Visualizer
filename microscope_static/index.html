@@ -17,9 +17,12 @@
       <button data-mode="both">both</button>
     </div>
     <button id="play">▶ play</button>
+    <button id="reset-sm" title="clear all solo/mute">↺ S/M</button>
     <button id="zoomout">－</button>
     <button id="zoomin">＋</button>
     <button id="fit">⤢ fit</button>
+    <button id="lock-btn" title="keep the playhead centered while playing (scroll lock)">⊙ center</button>
+    <button id="toggle-sub" title="hide/show sub-components (drum kit, bass registers)">▾ hide sub</button>
     <div class="comp-wrap">
       <button id="comp-btn">◫ components</button>
       <div id="comp-panel" class="panel" hidden></div>
@@ -37,10 +40,13 @@
           ✨ HQ vocals (BS-Roformer) <span>— cleaner + cascades drums/bass/other</span></label>
         <label class="hqvox"><input type="checkbox" id="drum-kit" checked>
           🥁 drum kit (DrumSep) <span>— real kick/snare/toms/hh/ride/crash, +~25s</span></label>
+        <label class="hqvox"><input type="checkbox" id="six-stem">
+          🎸 6-stem (Demucs 6s) <span>— adds guitar + piano (piano weak)</span></label>
         <div class="hint">URL audio is lossy (~160 kbps). Files keep full quality.</div>
       </div>
     </div>
     <button id="live-btn">● live</button>
+    <button id="scene-btn">✦ scene</button>
     <div class="spacer"></div>
     <div class="readout" id="readout"></div>
   </header>
@@ -83,14 +89,38 @@
 
   <div id="drop-overlay" hidden><div>⤓ drop to analyze</div></div>
 
+  <div id="scene" hidden>
+    <canvas id="scene-canvas"></canvas>
+    <div id="scene-hud">
+      <div class="styles" id="scene-styles">
+        <button data-s="stage" class="on">🎭 stage</button>
+        <button data-s="pitch">♪ pitch-roll</button>
+        <button data-s="constellation">orbs</button>
+        <button data-s="field">field</button>
+        <button data-s="roll">piano-roll</button>
+        <button data-s="geometry">geometry</button>
+      </div>
+      <div id="scene-insts"></div>
+      <div class="scene-hint">drag = rotate · click an instrument chip = solo · <kbd>space</kbd> = play</div>
+    </div>
+  </div>
+
   <footer>
-    <kbd>pinch</kbd> or <kbd>⌘/ctrl+scroll</kbd> = zoom &nbsp;·&nbsp;
-    <kbd>two-finger swipe</kbd> or <kbd>drag</kbd> = pan &nbsp;·&nbsp;
-    <kbd>click</kbd> = seek &nbsp;·&nbsp; <kbd>space</kbd> = play/pause &nbsp;·&nbsp;
-    <b>S</b>/<b>M</b> = solo/mute &nbsp;·&nbsp; zoom in to read individual waveform cycles
+    <div id="legend">
+      <button class="lg on" data-k="sections"><span class="sw sec"></span>sections</button>
+      <button class="lg on" data-k="beats"><span class="sw beat"></span>beats</button>
+      <button class="lg on" data-k="phrases"><span class="sw phrase"></span>phrases</button>
+    </div>
+    <span class="hints">
+      <kbd>pinch</kbd>/<kbd>⌘+scroll</kbd> zoom &nbsp;·&nbsp;
+      <kbd>↔ swipe</kbd>/<kbd>drag</kbd> pan &nbsp;·&nbsp;
+      <kbd>↕ scroll</kbd> tracks &nbsp;·&nbsp;
+      <kbd>click</kbd> seek &nbsp;·&nbsp; <kbd>space</kbd> play
+    </span>
   </footer>
 </div>
 <audio id="audio" preload="auto"></audio>
 <script src="/static/app.js"></script>
+<script src="/static/scene.js"></script>
 </body>
 </html>
