@@ -24,6 +24,8 @@ const Scene = {
   insts: [], particles: [], events: [], builtFor: null,
   kit: {}, chroma: new Array(12).fill(0), voxHz: 0, voxLvl: 0, voxTrail: [], voxHist: [], bassHz: 0,
   frame: 0, voxXs: 0, voxYs: 0, voxLvlS: 0, pitchBuf: [],
+  // WebGL mandala (lazy-initialised on first use)
+  gl: null, glProg: null, glCanvas: null, glU: null, glFailed: false, mandalaRot: 0, _chromaArr: null,
 
   _lerp(a, b, t) { return a + (b - a) * t; },
 
@@ -228,6 +230,121 @@ const Scene = {
     return hz[i] || 0;
   },
 
+  // ---- 6. Kaleidoscope mandala (WebGL) ----
+  // 12 chroma bins drive 12 mirrored petals; beat pulses the rings, bass breathes
+  // the center, overall energy lights the core, and hue cycles with time.
+  MANDALA_FS: `
+    precision highp float;
+    uniform vec2 u_res;
+    uniform float u_time;
+    uniform float u_chroma[12];
+    uniform float u_beat;
+    uniform float u_bass;
+    uniform float u_energy;
+    uniform float u_rot;
+    #define TAU 6.28318530718
+    vec3 hsv(float h, float s, float v){
+      vec3 c = clamp(abs(mod(h*6.0 + vec3(0.0,4.0,2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+      return v * mix(vec3(1.0), c, s);
+    }
+    float chromaAt(int idx){
+      for (int i = 0; i < 12; i++){ if (i == idx) return u_chroma[i]; }
+      return 0.0;
+    }
+    void main(){
+      vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / min(u_res.x, u_res.y);
+      float r = length(uv);
+      r *= 1.0 + u_bass * 0.45 * sin(r * 7.0 - u_time * 1.6);   // bass breathes the center
+      float a = atan(uv.y, uv.x) + u_rot;
+      float sector = TAU / 12.0;
+      float si = floor(a / sector + 0.5);
+      float folded = abs(a - si * sector);                     // mirror -> 24-fold symmetry
+      int idx = int(mod(si, 12.0));
+      float e = chromaAt(idx);
+      vec3 col = vec3(0.0);
+      for (int k = 0; k < 5; k++){
+        float fk = float(k);
+        float ringR = 0.13 + fk * 0.17;
+        float pulse = ringR * (1.0 + u_beat * 0.10) + e * 0.05;
+        float petalW = 0.04 + e * 0.16;
+        float band = exp(-pow((r - pulse) / petalW, 2.0));
+        float angW = 0.05 + e * 0.40;
+        float ang = exp(-pow(folded / angW, 2.0));
+        float m = band * ang * (0.25 + e * 1.6);
+        float hue = fract(float(idx) / 12.0 + u_time * 0.015 + fk * 0.04);
+        col += hsv(hue, 0.75, 1.0) * m;
+      }
+      col += hsv(fract(u_time * 0.025), 0.35, 1.0) * u_energy * 0.6 * exp(-r * r * 7.0);  // core glow
+      col *= smoothstep(1.5, 0.15, r);                         // vignette
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+
+  _glShader(gl, type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.error("shader:", gl.getShaderInfoLog(s)); return null; }
+    return s;
+  },
+
+  ensureGL() {
+    if (this.gl) return this.gl;
+    if (this.glFailed) return null;
+    const c = this.glCanvas = document.getElementById("scene-gl");
+    const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
+    if (!gl) { this.glFailed = true; return null; }
+    const vs = this._glShader(gl, gl.VERTEX_SHADER, "attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }");
+    const fs = this._glShader(gl, gl.FRAGMENT_SHADER, this.MANDALA_FS);
+    if (!vs || !fs) { this.glFailed = true; return null; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.error("link:", gl.getProgramInfoLog(prog)); this.glFailed = true; return null; }
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW); // full-screen triangle
+    const loc = gl.getAttribLocation(prog, "p");
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    this.glU = {
+      res: gl.getUniformLocation(prog, "u_res"), time: gl.getUniformLocation(prog, "u_time"),
+      chroma: gl.getUniformLocation(prog, "u_chroma[0]"), beat: gl.getUniformLocation(prog, "u_beat"),
+      bass: gl.getUniformLocation(prog, "u_bass"), energy: gl.getUniformLocation(prog, "u_energy"),
+      rot: gl.getUniformLocation(prog, "u_rot"),
+    };
+    this.gl = gl; this.glProg = prog;
+    return gl;
+  },
+
+  renderMandala(f) {
+    const gl = this.ensureGL();
+    if (!gl) {  // WebGL unavailable — keep the 2D canvas with a notice
+      this.canvas.style.display = "block";
+      if (this.glCanvas) this.glCanvas.style.display = "none";
+      const ctx = this.ctx; ctx.fillStyle = "#06070d"; ctx.fillRect(0, 0, this.W, this.H);
+      ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = "13px ui-monospace, monospace"; ctx.textAlign = "center";
+      ctx.fillText("WebGL unavailable — mandala needs it", this.W / 2, this.H / 2); ctx.textAlign = "left";
+      return;
+    }
+    this.canvas.style.display = "none";
+    this.glCanvas.style.display = "block";
+    const w = Math.max(1, Math.round(this.W * this.dpr)), h = Math.max(1, Math.round(this.H * this.dpr));
+    if (this.glCanvas.width !== w || this.glCanvas.height !== h) { this.glCanvas.width = w; this.glCanvas.height = h; }
+    gl.viewport(0, 0, w, h);
+    this.mandalaRot += this.dt * 0.08 + f.beat * 0.05;          // drift + a kick on every beat
+    let energy = 0; for (const o of this.insts) energy += o.smooth; energy /= Math.max(1, this.insts.length);
+    const bass = (this.inst("bass") || {}).smooth || 0;
+    if (!this._chromaArr) this._chromaArr = new Float32Array(12);
+    for (let i = 0; i < 12; i++) this._chromaArr[i] = this.chroma[i] || 0;
+    const U = this.glU;
+    gl.useProgram(this.glProg);
+    gl.uniform2f(U.res, w, h);
+    gl.uniform1f(U.time, this.clock);
+    gl.uniform1fv(U.chroma, this._chromaArr);
+    gl.uniform1f(U.beat, f.beat);
+    gl.uniform1f(U.bass, Math.min(1, bass * 1.5));
+    gl.uniform1f(U.energy, Math.min(1, energy * 1.5));
+    gl.uniform1f(U.rot, this.mandalaRot);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  },
+
   loop() {
     this.raf = requestAnimationFrame(() => this.loop());
     if (!this.on) return;
@@ -241,6 +358,10 @@ const Scene = {
     if (!this.insts.length) { ctx.fillStyle = "#04050a"; ctx.fillRect(0, 0, W, H); return; }
     this.autoYaw += 0.0015; this.frame++;
     const f = this.sample();
+    // mandala is rendered on a separate WebGL canvas; everything else on the 2D one
+    if (this.style === "mandala") { this.renderMandala(f); this.syncHUD(); return; }
+    if (this.glCanvas) this.glCanvas.style.display = "none";
+    this.canvas.style.display = "block";
     if (this.style === "stage") this.renderStage(ctx, W, H, f);
     else if (this.style === "pitch") this.renderPitch(ctx, W, H, f);
     else if (this.style === "constellation") this.renderConstellation(ctx, W, H, f);

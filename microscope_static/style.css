@@ -110,6 +110,7 @@ body.live #scroll, body.live #ruler-wrap { display: none; }
 #scene { flex: 1; position: relative; min-height: 0; background: #04050a; }
 body.scene #scroll, body.scene #ruler-wrap { display: none; }
 #scene-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#scene-gl { position: absolute; inset: 0; width: 100%; height: 100%; display: none; }
 #scene-hud { position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px;
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   background: linear-gradient(transparent, rgba(4,5,10,.7)); pointer-events: none; }
