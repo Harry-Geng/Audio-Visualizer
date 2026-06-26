@@ -53,6 +53,7 @@ _demucs_apply.tqdm = _tqdm_mod
 from config import SR, HOP_LENGTH, FPS, DEMUCS_MODEL, STEM_NAMES
 from feature_extractor import extract_all
 from feature_writer import write_features
+from moment_index import build_song_moments
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -65,6 +66,22 @@ _WORKER_LOCK = threading.Lock()      # serialize heavy work
 _MODELS = {}                         # name -> loaded demucs model
 _MODEL_LOCK = threading.Lock()
 DEMUCS_6S_MODEL = "htdemucs_6s"      # adds guitar + piano (piano is weak)
+
+
+def _pick_device():
+    """cuda -> mps -> cpu. Demucs defaults to the *input tensor's* device, so we
+    must move both model and audio here or htdemucs silently runs on CPU."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+DEVICE = _pick_device()
+print(f"[ingest] torch device: {DEVICE}"
+      + (f" ({torch.cuda.get_device_name(0)})" if DEVICE.type == "cuda" else ""))
 
 # called by microscope.py after a song finishes so the server can serve it
 on_song_ready = None                 # fn(song_id, stems_dir)
@@ -120,6 +137,7 @@ def _load_model(name=DEMUCS_MODEL):
         m = _MODELS.get(name)
         if m is None:
             m = get_model(name)
+            m.to(DEVICE)
             m.eval()
             _MODELS[name] = m
         return m
@@ -141,8 +159,9 @@ def _separate_hq(path, model_name=DEMUCS_MODEL):
     mean, std = ref.mean(), ref.std()
     wav_n = (wav - mean) / (std + 1e-8)
     with torch.no_grad():
-        sources = apply_model(model, wav_n.unsqueeze(0), progress=True)[0]
-    sources = sources * std + mean       # back to original level
+        sources = apply_model(model, wav_n.unsqueeze(0).to(DEVICE),
+                              device=DEVICE, progress=True)[0]
+    sources = sources.cpu() * std + mean       # back to original level (std/mean are CPU)
 
     stems = {}
     for i, name in enumerate(model.sources):
@@ -181,8 +200,15 @@ def _get_separator(model_filename, outdir):
             sep = Separator(output_dir=outdir, output_format="WAV", log_level=_lg.WARNING)
             sep.load_model(model_filename=model_filename)
             _SEPARATORS[model_filename] = sep
-        else:
-            sep.output_dir = outdir
+        # Point BOTH the Separator and its loaded model_instance at this job's
+        # outdir. The model_instance does the actual writing and caches its own
+        # output_dir from load_model time, so reassigning only sep.output_dir
+        # (as before) made every reused separator write into the previous job's
+        # already-deleted temp dir -> "System error" on read. Sync both.
+        sep.output_dir = outdir
+        mi = getattr(sep, "model_instance", None)
+        if mi is not None:
+            mi.output_dir = outdir
         return sep
 
 
@@ -378,6 +404,16 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False, six_stem
                 "hq_vocals": use_hq_voc, "drum_kit": use_drumsep, "six_stem": six_stem,
             }
             write_features(feats, orig_dest)
+
+            # 4. moment index: per-moment interaction/descriptor/MERT facets for
+            #    the similarity + taste-mapping engine. Non-fatal: a failure here
+            #    must not lose the separated stems / features.
+            job.progress = 96
+            _set(job, "moments", "building moment index (MERT embeddings)…")
+            try:
+                build_song_moments(song_id, an_dir, feats, verbose=False)
+            except Exception as e:
+                print(f"  moment index failed (stems/features kept): {e}")
 
             if on_song_ready:
                 on_song_ready(song_id, an_dir)

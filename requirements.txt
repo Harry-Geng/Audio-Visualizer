@@ -51,3 +51,4 @@ urllib3==2.6.3
 audio-separator==0.44.2
 yt-dlp==2026.06.09
 torchvision==0.27.0
+transformers==5.12.1

@@ -24,3 +24,9 @@ _incoming/
 *_stems/
 *_stems_hq/
 *_features.json
+# moment-index artifacts (per-song, regenerable, ~1MB each)
+*_moments.npz
+*_moments.json
+
+# logs
+*.log
