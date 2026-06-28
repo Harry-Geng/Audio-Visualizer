@@ -50,7 +50,7 @@ _tqdm_mod.tqdm = _ReportingTqdm
 import demucs.apply as _demucs_apply          # noqa: E402
 _demucs_apply.tqdm = _tqdm_mod
 
-from config import SR, HOP_LENGTH, FPS, DEMUCS_MODEL, STEM_NAMES
+from config import SR, HOP_LENGTH, FPS, DEMUCS_MODEL, STEM_NAMES, LIBRARY_DIR
 from feature_extractor import extract_all
 from feature_writer import write_features
 from moment_index import build_song_moments
@@ -121,12 +121,21 @@ def _set(job, stage, message):
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+def _base_slug(title):
+    """Deterministic filesystem-safe id from a title (no uniqueness suffix).
+
+    The batch runner uses this to predict a song's id and skip it if already
+    processed, so it must stay in sync with _slugify_id's base.
+    """
+    base = re.sub(r"[^\w\-. ]+", "", title).strip() or "track"
+    return base[:80]
+
+
 def _slugify_id(title):
     """Filesystem-safe, unique song id derived from a title."""
-    base = re.sub(r"[^\w\-. ]+", "", title).strip() or "track"
-    base = base[:80]
+    base = _base_slug(title)
     cand, n = base, 2
-    while os.path.exists(os.path.join(HERE, f"{cand}_stems")):
+    while os.path.exists(os.path.join(LIBRARY_DIR, f"{cand}_stems")):
         cand = f"{base} ({n})"
         n += 1
     return cand
@@ -305,7 +314,7 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False, six_stem
 
             # 1. keep a soundfile-readable original for full-quality playback
             _set(job, "separating", "saving original…")
-            orig_dest = os.path.join(HERE, f"{song_id}.flac")
+            orig_dest = os.path.join(LIBRARY_DIR, f"{song_id}.flac")
             y_orig, sr_orig = sf.read(src_path, always_2d=True)
             sf.write(orig_dest, y_orig, sr_orig)
 
@@ -368,15 +377,17 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False, six_stem
                     use_drumsep = False
                 job.progress = 86
 
-            hq_dir = os.path.join(HERE, f"{song_id}_stems_hq")
-            an_dir = os.path.join(HERE, f"{song_id}_stems")
+            hq_dir = os.path.join(LIBRARY_DIR, f"{song_id}_stems_hq")
+            an_dir = os.path.join(LIBRARY_DIR, f"{song_id}_stems")
             os.makedirs(hq_dir, exist_ok=True)
             os.makedirs(an_dir, exist_ok=True)
 
             def _save(name, arr_stereo):
-                sf.write(os.path.join(hq_dir, f"{name}.wav"), arr_stereo, sr_hq, subtype="PCM_16")
+                # FLAC = lossless + ~4x smaller than PCM_16 WAV (verified). soundfile
+                # picks FLAC from the extension; default subtype is PCM_16 (parity).
+                sf.write(os.path.join(hq_dir, f"{name}.flac"), arr_stereo, sr_hq, subtype="PCM_16")
                 mono = _to_analysis(arr_stereo, sr_hq)
-                sf.write(os.path.join(an_dir, f"{name}.wav"), mono, SR, subtype="PCM_16")
+                sf.write(os.path.join(an_dir, f"{name}.flac"), mono, SR, subtype="PCM_16")
                 return mono
 
             # base stems = the 4 standard + any extras from 6-stem (guitar/piano)
@@ -425,6 +436,24 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False, six_stem
         traceback.print_exc()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def process_file_sync(src_path, title, hq_vocals=False, drum_kit=False,
+                      six_stem=False, lossy=False):
+    """Run the full pipeline synchronously (no worker thread) and return the Job.
+
+    Used by the batch runner, which processes songs one at a time and inspects
+    job.error / job.song_id after each. The browser path uses the threaded
+    start_*_job functions instead.
+    """
+    job = Job("file")
+    job.title = title
+    job.lossy = lossy
+    with _JOBS_LOCK:
+        _JOBS[job.id] = job
+    _run(job, src_path=src_path, hq_vocals=hq_vocals,
+         drum_kit=drum_kit, six_stem=six_stem)
+    return job
 
 
 def start_file_job(src_path, title, hq_vocals=False, drum_kit=False, six_stem=False):

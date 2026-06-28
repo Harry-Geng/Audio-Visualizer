@@ -22,7 +22,7 @@ import glob
 import numpy as np
 import soundfile as sf
 
-from config import SR
+from config import SR, stem_file
 from interactions import StemAnalysis, BASE_STEMS, FEATURE_NAMES as INT_NAMES
 import descriptors as _desc
 import embeddings as _emb
@@ -32,8 +32,8 @@ EMB_STEMS = ["mix"] + BASE_STEMS          # which embeddings we store per moment
 
 
 def _load_mono(stems_dir, name):
-    p = os.path.join(stems_dir, f"{name}.wav")
-    if not os.path.exists(p):
+    p = stem_file(stems_dir, name)
+    if p is None:
         return None
     y, _ = sf.read(p, dtype="float32", always_2d=False)
     return y if y.ndim == 1 else y.mean(axis=1)

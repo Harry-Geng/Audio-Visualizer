@@ -38,10 +38,10 @@ import librosa
 from scipy.signal import butter, sosfiltfilt
 
 import ingest
-from config import SR, HOP_LENGTH, STEM_NAMES
+from config import SR, HOP_LENGTH, STEM_NAMES, LIBRARY_DIR, stem_file
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(HERE, "microscope_static")
+STATIC_DIR = os.path.join(HERE, "microscope_static")  # code, ships with the app
 
 # ---------------------------------------------------------------------------
 # Track decomposition
@@ -72,18 +72,18 @@ LEGACY_DRUM_BANDS = ["kick", "snare", "hat"]
 def discover_songs():
     """Return {song_id: stems_dir} for every *_stems folder holding 4 stems."""
     songs = {}
-    for name in sorted(os.listdir(HERE)):
-        path = os.path.join(HERE, name)
+    for name in sorted(os.listdir(LIBRARY_DIR)):
+        path = os.path.join(LIBRARY_DIR, name)
         if not (os.path.isdir(path) and name.endswith("_stems")):
             continue
-        if all(os.path.exists(os.path.join(path, f"{s}.wav")) for s in STEM_NAMES):
+        if all(stem_file(path, s) for s in STEM_NAMES):
             songs[name[: -len("_stems")]] = path
     return songs
 
 
 def _features_path(song_id):
     slug = song_id.lower().replace(" ", "_")
-    p = os.path.join(HERE, f"{slug}_features.json")
+    p = os.path.join(LIBRARY_DIR, f"{slug}_features.json")
     return p if os.path.exists(p) else None
 
 
@@ -94,7 +94,7 @@ _ORIG_EXTS = (".flac", ".wav", ".aiff", ".aif", ".mp3", ".m4a", ".aac", ".ogg")
 
 def _original_path(song_id):
     for ext in _ORIG_EXTS:
-        p = os.path.join(HERE, song_id + ext)
+        p = os.path.join(LIBRARY_DIR, song_id + ext)
         if os.path.exists(p):
             return p
     return None
@@ -120,14 +120,14 @@ class Song:
         self._loaded = False
 
     def _read_mono(self, name):
-        y, _ = sf.read(os.path.join(self.stems_dir, f"{name}.wav"),
+        y, _ = sf.read(stem_file(self.stems_dir, name),
                        dtype="float32", always_2d=False)
         if y.ndim > 1:
             y = y.mean(axis=1)
         return np.ascontiguousarray(y, dtype=np.float32)
 
     def _has(self, name):
-        return os.path.exists(os.path.join(self.stems_dir, f"{name}.wav"))
+        return stem_file(self.stems_dir, name) is not None
 
     def load(self):
         with self._lock:
@@ -334,11 +334,19 @@ class Song:
         cache = self.__dict__.setdefault("_track_wavs", {})
         if name in cache:
             return cache[name]
-        # prefer full-rate stereo HQ stem if available (drums/bass/vocals/other)
-        hq = os.path.join(self.hq_dir, f"{name}.wav")
-        if os.path.exists(hq):
-            with open(hq, "rb") as f:
-                cache[name] = f.read()
+        # prefer full-rate stereo HQ stem if available (drums/bass/vocals/other).
+        # WAV is streamed as-is; FLAC is decoded to WAV here (browsers get WAV
+        # either way). Result is cached, so the decode is one-time per stem.
+        hq = stem_file(self.hq_dir, name)
+        if hq is not None:
+            if hq.lower().endswith(".wav"):
+                with open(hq, "rb") as f:
+                    cache[name] = f.read()
+            else:
+                y, sr = sf.read(hq, dtype="float32", always_2d=False)
+                buf = io.BytesIO()
+                sf.write(buf, y, sr, format="WAV", subtype="PCM_16")
+                cache[name] = buf.getvalue()
             return cache[name]
         scale = self.norm["mix"]
         pcm = np.clip(self.tracks[name] / scale, -1, 1)
