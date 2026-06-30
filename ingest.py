@@ -83,6 +83,14 @@ DEVICE = _pick_device()
 print(f"[ingest] torch device: {DEVICE}"
       + (f" ({torch.cuda.get_device_name(0)})" if DEVICE.type == "cuda" else ""))
 
+# Ampere+ free speedups for the conv-heavy separation models: TF32 matmul/conv
+# (negligible precision change for audio stems) and cudnn autotuning of kernels
+# (the per-song input shape is stable, so the autotune cost is paid once).
+if DEVICE.type == "cuda":
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+
 # called by microscope.py after a song finishes so the server can serve it
 on_song_ready = None                 # fn(song_id, stems_dir)
 
@@ -425,6 +433,21 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False, six_stem
                 build_song_moments(song_id, an_dir, feats, verbose=False)
             except Exception as e:
                 print(f"  moment index failed (stems/features kept): {e}")
+
+            # 5. lyrics: LRCLIB official text + word-level forced alignment to the
+            #    vocal stem (karaoke). Non-fatal. Skipped when AV_SKIP_LYRICS is set
+            #    (e.g. the bulk batch, so the 1.2 GB aligner doesn't compete with the
+            #    separation models for VRAM) — run backfill_lyrics.py afterwards.
+            job.progress = 98
+            if not os.environ.get("AV_SKIP_LYRICS"):
+                _set(job, "lyrics", "fetching + aligning lyrics…")
+                try:
+                    import lyrics as _lyrics
+                    artist, track = (title.split(" - ", 1) + [""])[:2] if " - " in title else ("", title)
+                    _lyrics.build_song_lyrics(song_id, artist, track,
+                                              feats["meta"]["duration_seconds"], an_dir, verbose=False)
+                except Exception as e:
+                    print(f"  lyrics failed (song kept): {e}")
 
             if on_song_ready:
                 on_song_ready(song_id, an_dir)

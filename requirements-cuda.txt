@@ -1,0 +1,90 @@
+# CUDA environment for Windows + NVIDIA GPU (built/tested on RTX 3070 Ti, 8 GB).
+#
+# The torch/torchaudio/torchvision +cu124 wheels come from PyTorch's CUDA index
+# (the --extra-index-url below). Everything else resolves from PyPI.
+#
+# Fresh setup:
+#   py -3.12 -m venv .venv
+#   .\.venv\Scripts\python -m pip install -U pip
+#   .\.venv\Scripts\python -m pip install -r requirements-cuda.txt
+#
+# NOTE: ignore the Apple-Silicon torch pins in requirements.txt (torch==2.12.0 /
+# torchaudio==2.11.0) on CUDA. This file is the matched CUDA pair instead:
+# torch 2.6.0 <-> torchaudio 2.6.0 <-> torchvision 0.21.0, all +cu124.
+# Also needs ffmpeg on PATH (yt-dlp URL ingest + decoding). On Windows:
+#   winget install Gyan.FFmpeg
+
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch==2.6.0+cu124
+torchaudio==2.6.0+cu124
+torchvision==0.21.0+cu124
+
+absl-py==2.4.0
+antlr4-python3-runtime==4.9.3
+audio-separator==0.44.2
+audioread==3.1.0
+beartype==0.18.5
+certifi==2026.6.17
+cffi==2.0.0
+charset-normalizer==3.4.7
+cloudpickle==3.1.2
+colorama==0.4.6
+Cython==3.2.5
+decorator==5.3.1
+demucs==4.0.1
+diffq-fixed==0.2.4
+dora_search==0.1.12
+einops==0.8.2
+filelock==3.29.0
+flatbuffers==25.12.19
+fsspec==2026.4.0
+idna==3.18
+Jinja2==3.1.6
+joblib==1.5.3
+julius==0.2.8
+lameenc==1.8.2
+lazy-loader==0.5
+librosa==0.11.0
+llvmlite==0.47.0
+MarkupSafe==3.0.3
+ml_collections==1.1.0
+ml_dtypes==0.5.4
+mpmath==1.3.0
+msgpack==1.2.0
+narwhals==2.22.1
+networkx==3.6.1
+numba==0.65.1
+numpy==2.4.6
+omegaconf==2.3.1
+onnx-weekly==1.22.0.dev20260615
+onnx2torch-py313==1.6.0
+onnxruntime-gpu==1.27.0
+openunmix==1.3.0
+packaging==26.2
+pillow==12.2.0
+platformdirs==4.10.0
+pooch==1.9.0
+protobuf==7.35.1
+pycparser==3.0
+pydub==0.25.1
+PyYAML==6.0.3
+requests==2.34.2
+resampy==0.4.3
+retrying==1.4.2
+rotary-embedding-torch==0.6.5
+samplerate==0.1.0
+scikit-learn==1.9.0
+scipy==1.17.1
+setuptools==70.2.0
+six==1.17.0
+soundfile==0.14.0
+soxr==1.1.0
+submitit==1.5.4
+sympy==1.13.1
+threadpoolctl==3.6.0
+tqdm==4.68.3
+treetable==0.2.6
+typing_extensions==4.15.0
+urllib3==2.7.0
+yt-dlp==2026.6.9

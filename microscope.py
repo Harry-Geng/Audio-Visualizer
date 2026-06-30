@@ -510,6 +510,13 @@ class Handler(BaseHTTPRequestHandler):
                 wav = song.playback_wav() if track in ("full", "") else song.track_wav(track)
                 return self._send(200, wav, "audio/wav", {"Accept-Ranges": "none"})
 
+            if path == "/api/lyrics":
+                p = os.path.join(LIBRARY_DIR, f"{q['id'][0]}_lyrics.json")
+                if not os.path.exists(p):
+                    return self._json({"error": "no lyrics"}, 404)
+                with open(p, "rb") as f:
+                    return self._send(200, f.read(), "application/json")
+
             if path == "/api/job":
                 j = ingest.get_job(q.get("id", [""])[0])
                 return self._json(j or {"error": "not found"}, 200 if j else 404)

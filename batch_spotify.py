@@ -45,6 +45,7 @@ import re
 import sys
 import json
 import time
+import queue
 import shutil
 import secrets
 import argparse
@@ -434,60 +435,113 @@ def main():
     processed = skipped = failed = 0
     t_start = time.time()
 
-    for i, tr in enumerate(tracks, 1):
-        if args.limit and processed >= args.limit:
-            print(f"[batch] reached --limit {args.limit}, stopping.")
-            break
+    # ── producer/consumer: a background thread downloads the next songs (yt-dlp is
+    #    network/CPU-bound) while the main thread runs separation on the GPU, so the
+    #    GPU never idles waiting on a download. PREFETCH bounds how far ahead we pull
+    #    (and thus temp-disk use). Only the main thread touches the GPU pipeline. ──
+    PREFETCH = 2
+    dlq = queue.Queue(maxsize=PREFETCH)
+    stop_evt = threading.Event()
 
-        slug = ingest._base_slug(tr["title"])
-        if os.path.isdir(os.path.join(LIBRARY_DIR, f"{slug}_stems")):
-            skipped += 1
-            continue
+    def _tmpdir_of(item):
+        return item[5] if item[0] == "ok" else item[4]
 
-        n_new = processed + failed + 1
-        eta = ""
-        if processed + failed:
-            avg = (time.time() - t_start) / (processed + failed)
-            eta = f" | ~{_fmt_dur(avg)}/song"
-        print(f"\n[{i}/{len(tracks)}] (#{n_new} new){eta}  {tr['title']}")
+    def producer():
+        queued = 0
+        for idx, tr in enumerate(tracks, 1):
+            if stop_evt.is_set():
+                break
+            if args.limit and queued >= args.limit:
+                break
+            slug = ingest._base_slug(tr["title"])
+            if os.path.isdir(os.path.join(LIBRARY_DIR, f"{slug}_stems")):
+                continue                                   # already done → skip silently
+            queued += 1
+            tmpdir = tempfile.mkdtemp(prefix="batch_")
+            try:
+                flac, meta = download_track(tr["title"], tr["duration_s"], tmpdir)
+                item = ("ok", idx, tr, flac, meta, tmpdir)
+            except Exception as e:                         # download failure → report
+                item = ("dlfail", idx, tr, e, tmpdir)
+            while not stop_evt.is_set():                   # block when consumer is behind
+                try:
+                    dlq.put(item, timeout=1.0); break
+                except queue.Full:
+                    continue
+            else:
+                shutil.rmtree(tmpdir, ignore_errors=True); return
+        dlq.put(None)                                      # sentinel: no more songs
 
-        tmpdir = tempfile.mkdtemp(prefix="batch_")
-        t0 = time.time()
-        try:
-            flac, meta = download_track(tr["title"], tr["duration_s"], tmpdir)
+    prod = threading.Thread(target=producer, name="downloader", daemon=True)
+    prod.start()
+
+    try:
+        while True:
+            item = dlq.get()
+            if item is None:
+                break
+            t0 = time.time()
+            n_new = processed + failed + 1
+            eta = ""
+            if processed + failed:
+                avg = (time.time() - t_start) / (processed + failed)
+                eta = f" | ~{_fmt_dur(avg)}/song"
+            idx, tr = item[1], item[2]
+            print(f"\n[{idx}/{len(tracks)}] (#{n_new} new){eta}  {tr['title']}")
+
+            if item[0] == "dlfail":
+                failed += 1
+                e = item[3]
+                print(f"    FAILED (download): {e}")
+                log_result({"title": tr["title"], "spotify_id": tr["spotify_id"],
+                            "status": "error", "error": str(e),
+                            "elapsed_s": round(time.time() - t0, 1)})
+                shutil.rmtree(item[4], ignore_errors=True)
+                continue
+
+            _, _, _, flac, meta, tmpdir = item
             if meta.get("duration_mismatch"):
                 print(f"    ! duration mismatch: yt={_fmt_dur(meta['yt_duration'])} "
                       f"vs spotify={_fmt_dur(tr['duration_s'])} — '{meta['yt_title']}'")
-
-            job = ingest.process_file_sync(
-                flac, tr["title"], hq_vocals=True, drum_kit=True, lossy=True)
-
-            rec = {"title": tr["title"], "spotify_id": tr["spotify_id"],
-                   "song_id": job.song_id, "elapsed_s": round(time.time() - t0, 1),
-                   **meta}
-            if job.error:
+            try:
+                job = ingest.process_file_sync(
+                    flac, tr["title"], hq_vocals=True, drum_kit=True, lossy=True)
+                rec = {"title": tr["title"], "spotify_id": tr["spotify_id"],
+                       "song_id": job.song_id, "elapsed_s": round(time.time() - t0, 1),
+                       **meta}
+                if job.error:
+                    failed += 1
+                    rec["status"] = "error"; rec["error"] = job.error
+                    print(f"    FAILED: {job.error}")
+                else:
+                    processed += 1
+                    rec["status"] = "ok"
+                    print(f"    ok -> {job.song_id}  ({rec['elapsed_s']}s)")
+                log_result(rec)
+            except Exception as e:
                 failed += 1
-                rec["status"] = "error"
-                rec["error"] = job.error
-                print(f"    FAILED: {job.error}")
-            else:
-                processed += 1
-                rec["status"] = "ok"
-                print(f"    ok -> {job.song_id}  ({rec['elapsed_s']}s)")
-            log_result(rec)
-        except KeyboardInterrupt:
-            print("\n[batch] interrupted by user.")
-            shutil.rmtree(tmpdir, ignore_errors=True)
-            break
-        except Exception as e:
-            failed += 1
-            print(f"    FAILED (download/pipeline): {e}")
-            traceback.print_exc()
-            log_result({"title": tr["title"], "spotify_id": tr["spotify_id"],
-                        "status": "error", "error": str(e),
-                        "elapsed_s": round(time.time() - t0, 1)})
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+                print(f"    FAILED (pipeline): {e}")
+                traceback.print_exc()
+                log_result({"title": tr["title"], "spotify_id": tr["spotify_id"],
+                            "status": "error", "error": str(e),
+                            "elapsed_s": round(time.time() - t0, 1)})
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+            if args.limit and processed >= args.limit:
+                print(f"[batch] reached --limit {args.limit}, stopping.")
+                break
+    except KeyboardInterrupt:
+        print("\n[batch] interrupted by user.")
+    finally:
+        stop_evt.set()
+        try:                                               # clean up prefetched temp dirs
+            while True:
+                left = dlq.get_nowait()
+                if left:
+                    shutil.rmtree(_tmpdir_of(left), ignore_errors=True)
+        except queue.Empty:
+            pass
 
     dt = time.time() - t_start
     print(f"\n[batch] done in {_fmt_dur(dt)}  |  "

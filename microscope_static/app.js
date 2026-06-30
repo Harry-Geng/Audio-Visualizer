@@ -37,7 +37,8 @@ const els = {
   song: $("#song"), mode: $("#mode"), play: $("#play"), fit: $("#fit"),
   zin: $("#zoomin"), zout: $("#zoomout"), lock: $("#lock-btn"),
   compBtn: $("#comp-btn"), compPanel: $("#comp-panel"),
-  resetSm: $("#reset-sm"), toggleSub: $("#toggle-sub"),
+  resetSm: $("#reset-sm"), toggleSub: $("#toggle-sub"), masterVol: $("#master-vol"),
+  lyricsBtn: $("#lyrics-btn"), lyricsPanel: $("#lyrics-panel"),
   readout: $("#readout"), ruler: $("#ruler"), tracks: $("#tracks"),
   overlay: $("#overlay"), overlayWrap: $("#overlay-wrap"),
   playhead: $("#playhead"), cursor: $("#cursor"), scroll: $("#scroll"),
@@ -82,10 +83,13 @@ async function init() {
     requestRender(true);
   });
   els.play.onclick = () => Transport.toggle();
-  els.resetSm.onclick = () => {                 // clear all solo/mute → back to full mix
-    S.rows.forEach(r => { r.solo = false; r.mute = false; });
+  els.resetSm.onclick = () => {                 // clear all solo/mute/volume → back to full mix
+    S.rows.forEach(r => { r.solo = false; r.mute = false; r.vol = 1; });
     syncRowBtns(); Transport.refresh();
   };
+  els.masterVol.oninput = () => Transport.setMaster(parseFloat(els.masterVol.value));
+  els.masterVol.ondblclick = () => { els.masterVol.value = 1; Transport.setMaster(1); };
+  els.lyricsBtn.onclick = () => Lyrics.toggle();
   els.toggleSub.onclick = () => {               // collapse/expand ALL groups at once
     const groups = groupsWithChildren();
     const allCollapsed = groups.every(g => S.collapsed.has(g));
@@ -152,6 +156,7 @@ async function loadSong(id) {
   Transport.reset();
   applyVisibility();
   setView(0, S.meta.duration);
+  if (Lyrics.visible) Lyrics.load(id); else Lyrics.data = null;
 }
 
 // groups (parent stems) that actually have sub-components in this song
@@ -211,16 +216,24 @@ function buildRows() {
            <button class="solo" title="solo (hear only this)">S</button>
            <button class="mute" title="mute">M</button>
          </div>
+         ${t.id === "mix" ? "" :
+           `<input class="vol" type="range" min="0" max="1.5" step="0.01" value="1"
+                   title="volume (double-click to reset)">`}
        </div>
        <div class="cv"><canvas></canvas></div>`;
     els.tracks.appendChild(row);
     const canvas = row.querySelector("canvas");
     const r = {
       track: t, el: row, canvas, ctx: canvas.getContext("2d"),
-      color: c, w: 1, h: 1, cache: null, specCache: null, solo: false, mute: false,
+      color: c, w: 1, h: 1, cache: null, specCache: null, solo: false, mute: false, vol: 1,
     };
     row.querySelector(".solo").onclick = () => { r.solo = !r.solo; syncRowBtns(); Transport.refresh(); };
     row.querySelector(".mute").onclick = () => { r.mute = !r.mute; syncRowBtns(); Transport.refresh(); };
+    const vol = row.querySelector(".vol");
+    if (vol) {
+      vol.oninput = () => Transport.setVol(r.track.id, parseFloat(vol.value));
+      vol.ondblclick = () => { vol.value = 1; Transport.setVol(r.track.id, 1); };
+    }
     const cb = row.querySelector(".caret");
     if (cb) cb.onclick = e => { e.stopPropagation(); toggleGroup(t.id); };
     S.rows.push(r);
@@ -232,6 +245,9 @@ function syncRowBtns() {
     r.el.querySelector(".solo").classList.toggle("on", r.solo);
     r.el.querySelector(".mute").classList.toggle("on", r.mute);
     r.el.classList.toggle("dim", dim.has(r.track.id));
+    const v = r.el.querySelector(".vol");
+    if (v && parseFloat(v.value) !== r.vol) v.value = r.vol;
+    if (v) v.classList.toggle("adj", r.vol !== 1);
   }
 }
 
@@ -543,6 +559,7 @@ function setupInteractions() {
     if (e.key === "Escape") {                 // close any open panel / overlay
       els.addPanel.hidden = true; els.compPanel.hidden = true;
       els.dropOverlay.hidden = true;
+      if (Lyrics.visible) Lyrics.toggle();
       if (e.target.blur) e.target.blur();
       return;
     }
@@ -555,12 +572,179 @@ function setupInteractions() {
 }
 
 // ==========================================================================
+// Synced lyrics (karaoke) — fetches <id>_lyrics.json, highlights the current
+// line + word against the transport clock, click a line/word to seek.
+// ==========================================================================
+// connector words that render small + light (everything else is "content")
+const LS_STOP = new Set(("a an and the to of in on at is it i im you your we re they "
+  + "he she his her my me for with as so but or nor if then that this these those be "
+  + "been was were are am do did does got get up out off no not yeah oh ").split(" "));
+const LS_STATE = ["ls-d0", "ls-d1", "ls-d2", "ls-d3", "ls-d4"];
+
+// deterministic per-song hash + PRNG → stable editorial layout each load
+function lsHash(s) { let h = 2166136261 >>> 0; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function lsRng(seed) { let s = seed >>> 0; return () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; }; }
+function lsTier(word, rng) {
+  const n = word.toLowerCase().replace(/[^a-z']/g, "");
+  if (!n || (LS_STOP.has(n) && n.length <= 4)) return "sm";
+  if (n.length >= 7) return "lg";
+  return rng() < 0.28 ? "lg" : "md";        // occasional emphasis bump
+}
+function lsTime(t) { t = Math.max(0, t | 0); return Math.floor(t / 60) + ":" + String(t % 60).padStart(2, "0"); }
+
+const Lyrics = {
+  data: null, lines: [], lineEls: [], curLine: -1, visible: false, _built: false,
+  _spans: null, _words: null,
+
+  _dom() {
+    if (this._built) return;
+    this.panel = els.lyricsPanel;
+    this.stage = document.getElementById("ls-stage");
+    this.flow = document.getElementById("ls-flow");
+    this.bg = document.getElementById("ls-bg");
+    this.elPlay = document.getElementById("ls-play");
+    this.elTime = document.getElementById("ls-time");
+    this.elDur = document.getElementById("ls-dur");
+    this.scrub = document.getElementById("ls-scrub");
+    this.scrubFill = document.getElementById("ls-scrub-fill");
+    this.elTitle = document.getElementById("ls-title");
+    this.elPlay.onclick = () => Transport.toggle();
+    document.getElementById("ls-close").onclick = () => this.toggle();
+    const seekAt = ev => {
+      const r = this.scrub.getBoundingClientRect();
+      if (S.meta) Transport.seek(clamp((ev.clientX - r.left) / r.width, 0, 1) * S.meta.duration);
+    };
+    this.scrub.onpointerdown = e => {
+      seekAt(e); this.scrub.setPointerCapture(e.pointerId);
+      this.scrub.onpointermove = ev => { if (ev.buttons) seekAt(ev); };
+      this.scrub.onpointerup = () => { this.scrub.onpointermove = null; };
+    };
+    this._built = true;
+  },
+
+  async load(songId) {
+    this._dom();
+    this.data = null; this.lines = []; this.lineEls = []; this.curLine = -1;
+    this.flow.classList.add("loading"); this.flow.innerHTML = "";
+    this.elTitle.textContent = els.song.selectedOptions[0]?.textContent || "";
+    this._applyTheme(songId);
+    try {
+      const r = await fetch("/api/lyrics?id=" + encodeURIComponent(songId));
+      this.data = r.ok ? await r.json() : null;
+    } catch { this.data = null; }
+    this.render(songId);
+  },
+
+  _applyTheme(songId) {
+    const hue = lsHash(songId) % 360, hue2 = (hue + 38) % 360;
+    this.bg.style.background =
+      `linear-gradient(155deg, hsl(${hue} 56% 21%), hsl(${hue2} 62% 9%) 68%, hsl(${hue} 46% 6%))`;
+    this.panel.style.setProperty("--ls-hue", hue);
+    this.panel.style.setProperty("--ls-accent", `hsl(${hue} 92% 74%)`);
+  },
+
+  render(songId) {
+    this.lineEls = []; this.curLine = -1; this._spans = null;
+    this.flow.classList.remove("loading"); this.flow.innerHTML = "";
+    const lines = (this.data && this.data.lines) || [];
+    this.lines = lines;
+    if (!lines.length) { this.flow.innerHTML = `<div class="ls-nolyric">♪</div>`; return; }
+    const rng = lsRng(lsHash(songId));
+    for (const ln of lines) {
+      const d = document.createElement("div");
+      d.className = "ls-line"; d.style.setProperty("--indent", Math.floor(rng() * 15) + "%");
+      const txt = (ln.text || "").trim();
+      const words = ln.words && ln.words.length ? ln.words : null;
+      if (words) {
+        for (const w of words) {
+          const s = document.createElement("span");
+          s.className = "ls-word " + lsTier(w.w, rng); s.textContent = w.w;
+          s.onclick = e => { e.stopPropagation(); if (S.meta) Transport.seek(w.t); };
+          d.appendChild(s); d.appendChild(document.createTextNode(" "));
+        }
+      } else if (txt) {
+        for (const tok of txt.split(/\s+/)) {
+          const s = document.createElement("span");
+          s.className = "ls-word " + lsTier(tok, rng); s.textContent = tok;
+          d.appendChild(s); d.appendChild(document.createTextNode(" "));
+        }
+      } else { d.className = "ls-line ls-interlude"; d.textContent = "♪"; }
+      if (ln.t != null) d.onclick = ev => { if (ev.target === d) Transport.seek(ln.t); };
+      this.flow.appendChild(d); this.lineEls.push(d);
+    }
+    requestAnimationFrame(() => this._setActive(0, true));
+  },
+
+  // place the active line at the stage focal point (~42% down) via translateY
+  _scrollTo(idx, instant) {
+    const el = this.lineEls[idx]; if (!el) return;
+    const y = this.stage.clientHeight * 0.42 - (el.offsetTop + el.offsetHeight / 2);
+    if (instant) {
+      this.flow.style.transition = "none"; this.flow.style.transform = `translateY(${y}px)`;
+      void this.flow.offsetHeight; this.flow.style.transition = "";
+    } else this.flow.style.transform = `translateY(${y}px)`;
+  },
+
+  _setActive(idx, instant) {
+    if (this.curLine >= 0 && this.lineEls[this.curLine])     // clear old word highlight
+      this.lineEls[this.curLine].querySelectorAll(".sung,.cur").forEach(s => s.classList.remove("sung", "cur"));
+    for (let i = 0; i < this.lineEls.length; i++) {
+      const el = this.lineEls[i];
+      el.classList.remove(...LS_STATE);
+      el.classList.add("ls-d" + Math.min(idx < 0 ? 4 : Math.abs(i - idx), 4));
+    }
+    this.curLine = idx;
+    this._spans = idx >= 0 ? this.lineEls[idx].querySelectorAll(".ls-word") : null;
+    this._words = idx >= 0 ? this.lines[idx].words : null;
+    if (idx >= 0) this._scrollTo(idx, instant);
+  },
+
+  update(t) {
+    if (!this.visible) return;
+    if (this._built && S.meta) {                              // transport strip
+      const dur = S.meta.duration || 0;
+      this.scrubFill.style.width = (dur ? t / dur * 100 : 0) + "%";
+      this.elTime.textContent = lsTime(t); this.elDur.textContent = lsTime(dur);
+      this.elPlay.textContent = Transport.playing ? "❚❚" : "▶";
+    }
+    if (!this.lineEls.length) return;
+    const lines = this.lines;
+    let idx = -1;
+    for (let i = 0; i < lines.length; i++) { if (lines[i].t == null) continue; if (lines[i].t <= t) idx = i; else break; }
+    if (idx !== this.curLine) this._setActive(idx, false);
+    if (this._spans && this._words && this._spans.length === this._words.length)
+      for (let j = 0; j < this._words.length; j++) {
+        const w = this._words[j];
+        this._spans[j].classList.toggle("sung", t >= w.t);
+        this._spans[j].classList.toggle("cur", t >= w.t && t < (w.end ?? w.t + 0.4));
+      }
+  },
+
+  toggle() {
+    this.visible = !this.visible;
+    document.body.classList.toggle("lyrics-on", this.visible);
+    els.lyricsBtn.classList.toggle("on", this.visible);
+    if (this.visible) {
+      if (!this.data && S.songId) this.load(S.songId);
+      else if (this.lineEls.length) requestAnimationFrame(() => this._scrollTo(Math.max(0, this.curLine), true));
+    }
+  },
+};
+
+// ==========================================================================
 // WebAudio transport with solo / mute over decomposed components
 // ==========================================================================
 const Transport = {
   ac: null, master: null, buffers: new Map(), loading: new Map(),
-  sources: [], playing: false, offset: 0, startedAt: 0, activeKey: "",
+  sources: [], playing: false, offset: 0, startedAt: 0, _starting: false, activeKey: "",
   analysers: {}, sceneMode: false, _td: null, _fd: null,
+  gainNodes: {}, _mode: null,           // per-stem GainNodes + "full"|"components"
+  masterVol: 1,                         // overall tab volume (header dial)
+
+  setMaster(v) { this.masterVol = v; if (this.master) this.master.gain.value = v; },
+  rowVol(id) { const r = S.rows.find(x => x.track.id === id); return r ? (r.vol ?? 1) : 1; },
+  // any non-mix fader moved off unity → we must remix from individual stems
+  anyVolAdjusted() { return S.rows.some(r => r.track.id !== "mix" && (r.vol ?? 1) !== 1); },
 
   init() {
     this.ac = new (window.AudioContext || window.webkitAudioContext)();
@@ -580,7 +764,13 @@ const Transport = {
     const rows = S.rows, byId = id => rows.find(r => r.track.id === id);
     const anyMute = rows.some(r => r.mute), anySolo = rows.some(r => r.solo);
     const dim = new Set();
-    if (!anyMute && !anySolo) return { play: ["full"], dim };          // untouched → original
+    if (!anyMute && !anySolo) {
+      if (!this.anyVolAdjusted()) return { play: ["full"], dim };      // untouched → original
+      // faders moved but nothing soloed/muted → remix the base stems so each
+      // can be scaled independently (the "full" buffer is pre-mixed).
+      return { play: rows.filter(r => r.track.depth === 0 && r.track.id !== "mix")
+                          .map(r => r.track.id), dim };
+    }
     const mixRow = byId("mix");
     if (mixRow && mixRow.solo) {                                       // solo mix = whole song
       rows.forEach(r => { if (r.track.id !== "mix") dim.add(r.track.id); });
@@ -630,7 +820,10 @@ const Transport = {
   },
 
   curTime() {
-    const t = this.playing ? this.offset + (this.ac.currentTime - this.startedAt) : this.offset;
+    // While (re)starting sources we await buffer decode; freeze at `offset` so the
+    // playhead/lyrics don't run ahead of audio that hasn't actually started yet.
+    const t = (this.playing && !this._starting)
+      ? this.offset + (this.ac.currentTime - this.startedAt) : this.offset;
     return clamp(t, 0, S.meta ? S.meta.duration : 0);
   },
   stopSources() { for (const s of this.sources) { try { s.stop(); } catch {} } this.sources = []; },
@@ -638,6 +831,8 @@ const Transport = {
   async startSources() {
     this.stopSources();
     this.analysers = {};
+    this.gainNodes = {};
+    this._starting = true;              // freeze the clock until audio truly starts
     const off = this.offset;
 
     if (this.sceneMode && typeof Scene !== "undefined" && Scene.allInstrumentIds) {
@@ -651,6 +846,7 @@ const Transport = {
       this.activeKey = key;
       const bufs = await Promise.all(loadIds.map(id => this.load(id)));
       if (!this.playing || this.activeKey !== key) return;
+      this.startedAt = this.ac.currentTime; this._starting = false;   // anchor clock to real audio start
       let k = 0;
       if (playFull) {
         const buf = bufs[k++];
@@ -660,9 +856,10 @@ const Transport = {
         const buf = bufs[k++]; if (!buf) continue;
         const src = this.ac.createBufferSource(); src.buffer = buf;
         const an = this.ac.createAnalyser(); an.fftSize = 2048; an.smoothingTimeConstant = 0.6;
-        const g = this.ac.createGain(); g.gain.value = (!playFull && aud.has(id)) ? 1 : 0;
+        const g = this.ac.createGain();
+        g.gain.value = ((!playFull && aud.has(id)) ? 1 : 0) * this.rowVol(id);
         src.connect(an); an.connect(g); g.connect(this.master);
-        this.analysers[id] = an;
+        this.analysers[id] = an; this.gainNodes[id] = g;
         src.start(0, Math.min(off, buf.duration)); this.sources.push(src);
       }
       return;
@@ -671,12 +868,43 @@ const Transport = {
     const ids = this.resolve().play; this.activeKey = ids.join(",");
     const bufs = await Promise.all(ids.map(id => this.load(id)));
     if (!this.playing || this.activeKey !== ids.join(",")) return;
+    this.startedAt = this.ac.currentTime; this._starting = false;   // anchor clock to real audio start
+    this.gainNodes = {};
+    const isFull = ids.length === 1 && ids[0] === "full";
+    this._mode = isFull ? "full" : "components";
+    this.master.gain.value = this.masterVol;         // header dial = overall level
     for (let i = 0; i < ids.length; i++) {
       const buf = bufs[i]; if (!buf) continue;
       const src = this.ac.createBufferSource(); src.buffer = buf;
-      src.connect(this.master); src.start(0, Math.min(off, buf.duration));
+      if (isFull) {
+        src.connect(this.master);
+      } else {                                        // per-stem gain so faders work live
+        const g = this.ac.createGain(); g.gain.value = this.rowVol(ids[i]);
+        src.connect(g); g.connect(this.master);
+        this.gainNodes[ids[i]] = g;
+      }
+      src.start(0, Math.min(off, buf.duration));
       this.sources.push(src);
     }
+  },
+
+  // Live volume change. Updates the running GainNode in place (no audio restart)
+  // unless we cross the full<->components boundary, which needs a rebuild.
+  setVol(id, v) {
+    const r = S.rows.find(x => x.track.id === id); if (!r) return;
+    r.vol = v;
+    syncRowBtns();
+    if (!this.playing) return;
+    if (this.sceneMode) {
+      const g = this.gainNodes[id]; if (!g) return;
+      const aud = (typeof Scene !== "undefined") ? Scene.audibleSet() : "FULL";
+      const on = (aud !== "FULL" && aud.has(id)) ? 1 : 0;
+      g.gain.value = on * v; return;
+    }
+    const wantMode = (S.rows.some(x => x.solo || x.mute) || this.anyVolAdjusted())
+      ? "components" : "full";
+    if (wantMode !== this._mode) { this.refresh(); return; }   // rebuild once at boundary
+    const g = this.gainNodes[id]; if (g) g.gain.value = v;
   },
 
   // scene mode plays each base instrument separately (so each gets an analyser)
@@ -756,6 +984,7 @@ const Transport = {
   tick() {
     if (S.meta) {
       this.drawPlayhead();
+      Lyrics.update(this.curTime());
       if (this.playing) {
         const t = this.curTime(), span = S.view.end - S.view.start;
         if (t >= S.meta.duration - 0.02) this.pause();

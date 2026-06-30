@@ -27,6 +27,8 @@ _incoming/
 # moment-index artifacts (per-song, regenerable, ~1MB each)
 *_moments.npz
 *_moments.json
+# lyrics (per-song, regenerable via backfill_lyrics.py)
+*_lyrics.json
 
 # logs
 *.log
