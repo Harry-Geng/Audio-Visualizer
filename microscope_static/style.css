@@ -288,6 +288,36 @@ footer {
   background: var(--panel); border-top: 1px solid var(--line);
   display: flex; align-items: center; gap: 16px;
 }
+
+/* ── persistent transport/seek bar: a flex child of #app, so it stays visible in
+   every view (stem · scene · live). The lyric-speaker panel (z-index 200) covers
+   it and supplies its own scrubber. ─────────────────────────────────────────── */
+#tbar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  padding: 7px 14px; background: var(--panel); border-top: 1px solid var(--line);
+}
+#tbar-play {
+  flex: 0 0 auto; width: 34px; height: 28px; border-radius: 6px; cursor: pointer;
+  background: #1c1f29; border: 1px solid var(--line); color: var(--text); font-size: 12px;
+}
+#tbar-play:hover { background: #2a3550; border-color: #6aa8ff; }
+#tbar-cur, #tbar-dur {
+  flex: 0 0 auto; font-variant-numeric: tabular-nums; font-size: 11px;
+  color: var(--dim); min-width: 34px; text-align: center;
+}
+#tbar-track {
+  flex: 1; height: 8px; border-radius: 4px; cursor: pointer; position: relative;
+  background: rgba(255, 255, 255, .12);
+}
+#tbar-track:hover { background: rgba(255, 255, 255, .18); }
+#tbar-fill {
+  height: 100%; width: 0; border-radius: 4px; background: #6aa8ff; position: relative;
+}
+#tbar-fill::after {                                  /* draggable knob at the playhead */
+  content: ""; position: absolute; right: -6px; top: 50%; transform: translateY(-50%);
+  width: 12px; height: 12px; border-radius: 50%; background: #fff;
+  box-shadow: 0 0 4px rgba(0, 0, 0, .5);
+}
 footer .hints { margin-left: auto; }
 #legend { display: flex; gap: 6px; }
 #legend .lg {

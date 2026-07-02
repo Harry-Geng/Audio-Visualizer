@@ -732,6 +732,40 @@ const Lyrics = {
 };
 
 // ==========================================================================
+// Persistent transport / seek bar (bottom of #app). Stays visible in every view,
+// so you can scrub the song while in scene or live mode. Driven by Transport.tick.
+// ==========================================================================
+const TBar = {
+  _built: false,
+  _dom() {
+    if (this._built) return;
+    this.play = $("#tbar-play"); this.cur = $("#tbar-cur"); this.dur = $("#tbar-dur");
+    this.track = $("#tbar-track"); this.fill = $("#tbar-fill");
+    if (!this.track) return;                         // markup missing → retry next frame
+    this.play.onclick = () => Transport.toggle();
+    const seekAt = ev => {
+      const r = this.track.getBoundingClientRect();
+      if (S.meta) Transport.seek(clamp((ev.clientX - r.left) / r.width, 0, 1) * S.meta.duration);
+    };
+    this.track.onpointerdown = e => {
+      this.track.setPointerCapture(e.pointerId); seekAt(e);
+      this.track.onpointermove = ev => { if (ev.buttons) seekAt(ev); };
+      this.track.onpointerup = () => { this.track.onpointermove = null; };
+    };
+    this._built = true;
+  },
+  update(t) {
+    this._dom();
+    if (!this._built || !S.meta) return;
+    const dur = S.meta.duration || 0;
+    this.fill.style.width = (dur ? t / dur * 100 : 0) + "%";
+    this.cur.textContent = lsTime(t);
+    this.dur.textContent = lsTime(dur);
+    this.play.textContent = Transport.playing ? "❚❚" : "▶";
+  },
+};
+
+// ==========================================================================
 // WebAudio transport with solo / mute over decomposed components
 // ==========================================================================
 const Transport = {
@@ -985,6 +1019,7 @@ const Transport = {
     if (S.meta) {
       this.drawPlayhead();
       Lyrics.update(this.curTime());
+      TBar.update(this.curTime());
       if (this.playing) {
         const t = this.curTime(), span = S.view.end - S.view.start;
         if (t >= S.meta.duration - 0.02) this.pause();
@@ -1119,7 +1154,9 @@ const Live = {
     els.liveView.hidden = !this.on;
     els.liveBtn.classList.toggle("on", this.on);
     if (this.on) { await this.listDevices(); this.resize(); }
-    else this.stop();
+    // re-measure + redraw the stem view on exit: its canvases may have been built
+    // while hidden (display:none → 0-sized), e.g. switching songs in live mode.
+    else { this.stop(); requestAnimationFrame(() => { layout(); requestRender(true); }); }
   },
   async listDevices() {
     try { await navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop())); } catch {}

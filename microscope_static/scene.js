@@ -24,6 +24,7 @@ const Scene = {
   insts: [], particles: [], events: [], builtFor: null,
   kit: {}, chroma: new Array(12).fill(0), voxHz: 0, voxLvl: 0, voxTrail: [], voxHist: [], bassHz: 0,
   frame: 0, voxXs: 0, voxYs: 0, voxLvlS: 0, pitchBuf: [],
+  lyrics: null, lyWords: null,            // per-song lyrics + flattened word list (t/end)
   // WebGL mandala (lazy-initialised on first use)
   gl: null, glProg: null, glCanvas: null, glU: null, glFailed: false, mandalaRot: 0, _chromaArr: null,
 
@@ -97,6 +98,11 @@ const Scene = {
       cancelAnimationFrame(this.raf); this.loop();
     } else {
       cancelAnimationFrame(this.raf);
+      // Back to the stem view. Its canvases may have been (re)built while hidden
+      // (body.scene sets display:none → getBoundingClientRect is 0), e.g. when
+      // switching songs while in scene mode — which leaves them blank. Re-measure
+      // against the now-visible layout and redraw. rAF so the un-hide is applied first.
+      requestAnimationFrame(() => { layout(); requestRender(true); });
     }
   },
 
@@ -111,6 +117,7 @@ const Scene = {
 
   build() {
     if (!S.meta) return;
+    this.kit = {};                              // fresh per-piece hit state for the new song
     const base = S.meta.tracks.filter(t => t.depth === 0 && t.id !== "mix");
     const N = Math.max(1, base.length);
     const REG = { sub: -1, bass: -1, drums: -0.3, kick: -0.5, other: 0.2, guitar: 0.45, piano: 0.55, vocals: 1 };
@@ -126,6 +133,7 @@ const Scene = {
     });
     this.beats = (S.meta.features && S.meta.features.beats) || [];
     this.builtFor = S.songId;
+    this.loadLyrics(S.songId);
     this.buildHUD();
   },
 
@@ -156,6 +164,34 @@ const Scene = {
     if (!S.meta) return [];
     return S.meta.tracks.filter(t => t.group === "drums" && t.depth === 1).map(t => t.id);
   },
+
+  // fetch the song's lyrics and flatten to a time-sorted word list for fast lookup
+  loadLyrics(songId) {
+    this.lyrics = null; this.lyWords = null;
+    fetch("/api/lyrics?id=" + encodeURIComponent(songId))
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (S.songId !== songId) return;            // song changed mid-fetch → drop
+        const ws = [];
+        if (d && d.lines) for (const ln of d.lines)
+          if (ln.words) for (const w of ln.words)
+            if (w.w && w.t != null) ws.push({ w: w.w, t: w.t, end: w.end != null ? w.end : w.t + 0.5 });
+        this.lyrics = d; this.lyWords = ws;
+      })
+      .catch(() => {});
+  },
+
+  // the word being sung at time t, with a short hold + fade after it ends
+  currentWord(t) {
+    const ws = this.lyWords; if (!ws || !ws.length) return null;
+    let lo = 0, hi = ws.length - 1, idx = -1;        // last word whose start <= t
+    while (lo <= hi) { const m = (lo + hi) >> 1; if (ws[m].t <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
+    if (idx < 0) return null;
+    const w = ws[idx], HOLD = 1.0;
+    if (t > w.end + HOLD) return null;               // long gap (instrumental) → nothing
+    const fade = t <= w.end ? 1 : Math.max(0, 1 - (t - w.end) / HOLD);
+    return { w: w.w, active: t <= w.end, fade };
+  },
   inst(id) { return this.insts.find(o => o.id === id); },
 
   sample() {
@@ -177,13 +213,26 @@ const Scene = {
       o.prev = o.prev * 0.6 + lv * 0.4;
       o.lvl = lv;
     }
-    // per-drum-piece hits (decaying), for the stage kit
+    // per-drum-piece hits (decaying), for the stage kit. A hi-hat is real but
+    // sparse — its average level is a tiny fraction of the kick's, so a fixed
+    // threshold never fires for it. Instead: track each piece's own recent peak,
+    // normalize the level to that peak (so a quiet piece's hits read as ~1.0 just
+    // like a loud one), and gate activity RELATIVE to the loudest kit piece this
+    // song (+ a tiny absolute floor) so genuinely-empty pieces stay dark.
+    let kitMax = 1e-4;
     for (const p of parts) {
-      const k = this.kit[p] || (this.kit[p] = { hit: 0, prev: 0 });
-      const lv = Transport.level(p);
-      const onset = Math.max(0, lv - k.prev - 0.05);
-      k.prev = k.prev * 0.5 + lv * 0.5;
-      k.hit = Math.max(k.hit * 0.86, onset > 0.05 ? 1 : 0);
+      const k = this.kit[p] || (this.kit[p] = { hit: 0, nprev: 0, peak: 0 });
+      k.lv = Transport.level(p);
+      k.peak = Math.max(k.lv, k.peak * 0.997);
+      if (k.peak > kitMax) kitMax = k.peak;
+    }
+    for (const p of parts) {
+      const k = this.kit[p];
+      const active = k.peak > 0.018 && k.peak > 0.06 * kitMax;
+      const norm = active ? k.lv / (k.peak + 1e-4) : 0;      // 0..1 within this piece's own range
+      const onset = Math.max(0, norm - k.nprev);
+      k.nprev = k.nprev * 0.5 + norm * 0.5;
+      k.hit = Math.max(k.hit * 0.86, onset > 0.20 ? Math.min(1, onset * 1.6) : 0);
     }
     // harmony chroma from the most harmonic stem available
     const harm = ["piano", "guitar", "other"].find(id => Transport.analysers[id]);
@@ -668,7 +717,20 @@ const Scene = {
     ctx.textAlign = "center";
     ctx.fillStyle = "rgba(46,204,113,0.6)"; ctx.font = "12px ui-monospace, monospace";
     ctx.fillText("vocals", cx0, H * 0.035);
-    if (note) { ctx.fillStyle = "rgba(200,255,220,0.95)"; ctx.font = "16px ui-monospace, monospace"; ctx.fillText(note, x + r + 18, yCenter + 5); }
+    // karaoke: the current lyric word where the sung note used to be; fall back to
+    // the note name for songs that have no lyrics.
+    const cw = (this.lyWords && this.lyWords.length) ? this.currentWord(f.t) : null;
+    if (cw && cw.w) {
+      const big = 28 + lvl * 30;
+      ctx.font = `700 ${big | 0}px Inter, system-ui, sans-serif`;
+      ctx.shadowColor = `rgba(46,204,113,${0.5 * cw.fade})`; ctx.shadowBlur = 16;
+      ctx.fillStyle = `rgba(228,255,236,${cw.fade})`;
+      ctx.fillText(cw.w, cx0, H * 0.125);
+      ctx.shadowBlur = 0;
+    } else if (note) {
+      ctx.fillStyle = "rgba(200,255,220,0.95)"; ctx.font = "16px ui-monospace, monospace";
+      ctx.fillText(note, x + r + 18, yCenter + 5);
+    }
     ctx.textAlign = "left";
   },
 
