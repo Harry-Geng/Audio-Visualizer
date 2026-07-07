@@ -1,0 +1,4 @@
+# Windows launcher scripts must stay CRLF so cmd.exe runs their labels/goto
+# reliably, regardless of the cloner's core.autocrlf setting.
+*.bat text eol=crlf
+*.cmd text eol=crlf

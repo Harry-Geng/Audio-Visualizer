@@ -330,10 +330,14 @@ def fetch_playlist_tracks(playlist_id, token):
 # ---------------------------------------------------------------------------
 # YouTube download (yt-dlp), choosing the candidate closest in length
 # ---------------------------------------------------------------------------
-def download_track(query, target_s, tmpdir):
+def download_track(query, target_s, tmpdir, search_n=SEARCH_N, max_tries=3):
     """Search YouTube, pick the best-duration match, download + extract to FLAC.
 
-    Returns (flac_path, picked_meta). Raises on no usable result.
+    Tries successive candidates (best-duration first) when a pick can't be
+    downloaded — a single dead / geo-blocked / "video not available" upload no
+    longer kills the whole track, which is the main reason batch downloads fail.
+
+    Returns (flac_path, picked_meta). Raises only if every candidate fails.
     """
     import yt_dlp
 
@@ -345,17 +349,13 @@ def download_track(query, target_s, tmpdir):
     search_opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
                    "skip_download": True, **cookie_opt}
     with yt_dlp.YoutubeDL(search_opts) as ydl:
-        info = ydl.extract_info(f"ytsearch{SEARCH_N}:{query}", download=False)
+        info = ydl.extract_info(f"ytsearch{search_n}:{query}", download=False)
     entries = [e for e in (info.get("entries") or []) if e]
     if not entries:
         raise RuntimeError("no YouTube results")
 
     if target_s:
         entries.sort(key=lambda e: abs((e.get("duration") or 0) - target_s))
-    best = entries[0]
-    dur = best.get("duration")
-    far = bool(target_s and dur and abs(dur - target_s) > DUR_TOLERANCE_S)
-    page = best.get("webpage_url") or best.get("original_url") or best.get("url")
 
     dl_opts = {
         "format": "bestaudio/best",
@@ -364,20 +364,39 @@ def download_track(query, target_s, tmpdir):
         "quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True,
         **cookie_opt,
     }
-    with yt_dlp.YoutubeDL(dl_opts) as ydl:
-        ydl.download([page])
 
-    flac = os.path.join(tmpdir, "dl.flac")
-    if not os.path.exists(flac):
-        cands = [f for f in os.listdir(tmpdir) if f.startswith("dl.")]
-        if not cands:
-            raise RuntimeError("download produced no file")
-        flac = os.path.join(tmpdir, cands[0])
+    errors = []
+    for cand in entries[:max_tries]:
+        page = cand.get("webpage_url") or cand.get("original_url") or cand.get("url")
+        for f in os.listdir(tmpdir):                     # clear a prior attempt's partial
+            if f.startswith("dl."):
+                try:
+                    os.remove(os.path.join(tmpdir, f))
+                except OSError:
+                    pass
+        try:
+            with yt_dlp.YoutubeDL(dl_opts) as ydl:
+                ydl.download([page])
+        except Exception as e:
+            errors.append(f"{cand.get('id')}: {str(e).splitlines()[-1][:80]}")
+            continue                                     # dead upload → next candidate
 
-    return flac, {
-        "yt_title": best.get("title"), "yt_id": best.get("id"),
-        "yt_duration": dur, "duration_mismatch": far,
-    }
+        flac = os.path.join(tmpdir, "dl.flac")
+        if not os.path.exists(flac):
+            cands = [f for f in os.listdir(tmpdir) if f.startswith("dl.")]
+            if not cands:
+                errors.append(f"{cand.get('id')}: produced no file")
+                continue
+            flac = os.path.join(tmpdir, cands[0])
+
+        dur = cand.get("duration")
+        far = bool(target_s and dur and abs(dur - target_s) > DUR_TOLERANCE_S)
+        return flac, {
+            "yt_title": cand.get("title"), "yt_id": cand.get("id"),
+            "yt_duration": dur, "duration_mismatch": far,
+        }
+
+    raise RuntimeError("all candidates failed — " + " | ".join(errors[:4]))
 
 
 # ---------------------------------------------------------------------------
