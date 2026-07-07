@@ -318,6 +318,16 @@ footer {
   width: 12px; height: 12px; border-radius: 50%; background: #fff;
   box-shadow: 0 0 4px rgba(0, 0, 0, .5);
 }
+#radio-btn.on { background: #2a3550; border-color: #ffb86a; color: #fff; }
+#tbar-next {                                         /* radio "up next" chip */
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px; max-width: 300px;
+  padding: 4px 9px; border-radius: 6px; cursor: pointer;
+  background: #1c1f29; border: 1px solid var(--line); color: var(--text); font-size: 11px;
+}
+#tbar-next:hover { background: #2a3550; border-color: #ffb86a; }
+#tbar-next .tn-tag { color: #ffb86a; font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+#tbar-next #tbar-next-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tbar-next .tn-skip { color: var(--dim); }
 
 /* ── moment similarity explorer (right dock) ──────────────────────────────── */
 #sim-btn.on { background: #2a3550; border-color: #7fd0ff; color: #fff; }
@@ -342,6 +352,20 @@ body.sim-on #sim-panel { display: flex; }
   border-radius: 6px; font-size: 11px; padding: 4px 7px; cursor: pointer;
 }
 .sim-head button:hover { background: #2a3550; border-color: #7fd0ff; }
+.sim-search {
+  display: flex; gap: 6px; padding: 8px 10px; flex: 0 0 auto;
+  border-bottom: 1px solid var(--line);
+}
+.sim-search input {
+  flex: 1; background: #12141c; color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; font-size: 11.5px; padding: 5px 8px; min-width: 0;
+}
+.sim-search input:focus { outline: none; border-color: #7fd0ff; }
+.sim-search button {
+  flex: 0 0 auto; background: #1c1f29; color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; font-size: 11px; padding: 4px 10px; cursor: pointer;
+}
+.sim-search button:hover { background: #2a3550; border-color: #7fd0ff; }
 #sim-seed { padding: 7px 12px; font-size: 11px; color: var(--dim); flex: 0 0 auto; border-bottom: 1px solid var(--line); }
 #sim-seed b { color: #cdd6e6; }
 #sim-results { flex: 1; overflow-y: auto; padding: 8px; }
@@ -371,6 +395,36 @@ body.sim-on #sim-panel { display: flex; }
 .sim-info { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
 .sim-title { font-size: 12.5px; color: #e8edf6; line-height: 1.25; }
 .sim-time { font-size: 10.5px; color: #8f9bb3; font-variant-numeric: tabular-nums; }
+/* ── galaxy map (fullscreen starfield) ────────────────────────────────────── */
+#gal-btn.on { background: #2a3550; border-color: #b48cff; color: #fff; }
+#galaxy {
+  position: fixed; inset: 0; z-index: 90; background: #050508;
+}
+#gal-canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+#gal-tip {
+  position: fixed; z-index: 92; pointer-events: none;
+  background: rgba(10, 12, 20, .92); border: 1px solid #3a4260;
+  border-radius: 7px; padding: 6px 9px; max-width: 320px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+#gal-tip b { font-size: 12px; color: #e8edf6; font-weight: 600; }
+#gal-tip span { font-size: 10.5px; color: #8f9bb3; font-variant-numeric: tabular-nums; }
+#gal-hud {
+  position: fixed; left: 0; right: 0; top: 0; z-index: 91;
+  display: flex; align-items: center; gap: 14px; padding: 10px 14px;
+  background: linear-gradient(rgba(5,5,8,.85), transparent);
+  color: #cdd6e6; font-size: 12px;
+}
+#gal-status { font-weight: 600; }
+.gal-hint { color: #8f9bb3; font-size: 11px; }
+.gal-hint kbd { font-size: 10px; }
+#gal-close {
+  margin-left: auto; background: #1c1f29; color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  font-size: 12px; padding: 4px 9px; cursor: pointer;
+}
+#gal-close:hover { background: #2a3550; border-color: #b48cff; }
+
 footer .hints { margin-left: auto; }
 #legend { display: flex; gap: 6px; }
 #legend .lg {

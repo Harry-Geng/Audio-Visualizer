@@ -53,6 +53,8 @@
     <button id="scene-btn">✦ scene</button>
     <button id="lyrics-btn" title="synced lyrics (karaoke)">☰ lyrics</button>
     <button id="sim-btn" title="find moments across the library that sound like the current spot">✧ similar</button>
+    <button id="gal-btn" title="galaxy map — every moment of every song as a starfield">✹ map</button>
+    <button id="radio-btn" title="infinite radio — when a song ends, flow into the most similar moment elsewhere in the library">📻 radio</button>
     <div class="spacer"></div>
     <div class="readout" id="readout"></div>
   </header>
@@ -127,6 +129,16 @@
     </div>
   </div>
 
+  <div id="galaxy" hidden>
+    <canvas id="gal-canvas"></canvas>
+    <div id="gal-tip" hidden></div>
+    <div id="gal-hud">
+      <span id="gal-status">loading map…</span>
+      <span class="gal-hint">scroll = zoom · drag = pan · hover = listen · click = open · <kbd>esc</kbd> = exit</span>
+      <button id="gal-close" title="exit map (esc)">✕</button>
+    </div>
+  </div>
+
   <div id="sim-panel">
     <div class="sim-head">
       <span class="sim-h-title">✧ similar moments</span>
@@ -141,6 +153,10 @@
       </select>
       <button id="sim-refresh" title="search from the current playhead position">⟳ here</button>
       <button id="sim-close" title="close">✕</button>
+    </div>
+    <div class="sim-search">
+      <input id="sim-q" type="text" placeholder="⌕ describe a sound… “dark moody bassline”">
+      <button id="sim-q-go" title="search the library by description">go</button>
     </div>
     <div id="sim-seed"></div>
     <div id="sim-results"></div>
@@ -165,6 +181,7 @@
     <span id="tbar-cur">0:00</span>
     <div id="tbar-track"><div id="tbar-fill"></div></div>
     <span id="tbar-dur">0:00</span>
+    <button id="tbar-next" hidden><span class="tn-tag">up next</span><span id="tbar-next-label">…</span><span class="tn-skip">⏭</span></button>
   </div>
 </div>
 <audio id="audio" preload="auto"></audio>

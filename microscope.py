@@ -22,6 +22,7 @@ at any zoom. No third-party web deps: stdlib http.server + a tiny PNG encoder.
 import io
 import os
 import re
+import time
 import glob
 import json
 import uuid
@@ -529,6 +530,108 @@ def _seed_moment(song_id, t):
     return best
 
 
+# ---------------------------------------------------------------------------
+# text -> moment search (CLAP). Per-moment audio embeddings are precomputed by
+# backfill_clap.py (<id>_clap.npz); the text tower runs here on CPU per query.
+# The index snapshot refreshes in the background as the backfill adds songs.
+# ---------------------------------------------------------------------------
+_CLAP_MODEL_ID = "laion/clap-htsat-unfused"
+_CLAPX = {"data": None, "files": 0, "status": "idle", "scan_t": 0.0, "building": False}
+_CLAPX_LOCK = threading.Lock()
+_CLAP_TEXT = {"model": None, "tok": None}
+_CLAP_QCACHE = {}
+
+
+def _build_clapx():
+    try:
+        files = sorted(glob.glob(os.path.join(LIBRARY_DIR, "*_clap.npz")))
+        embs, meta = [], []
+        for f in files:
+            try:
+                d = np.load(f)
+                sid = os.path.basename(f)[: -len("_clap.npz")]
+                embs.append(d["emb"].astype(np.float32))
+                for s, e in zip(d["start_t"], d["end_t"]):
+                    meta.append((sid, float(s), float(e)))
+            except Exception:
+                continue
+        if embs:
+            _CLAPX["data"] = (np.concatenate(embs), meta)   # single atomic swap
+            _CLAPX.update(files=len(files), status="ready")
+            print(f"[clap] text-search index: {len(meta)} moments / {len(files)} songs")
+        else:
+            _CLAPX["status"] = "empty"
+    except Exception as e:
+        _CLAPX["status"] = "error"
+        print(f"[clap] index build failed: {e}")
+    finally:
+        _CLAPX["building"] = False
+
+
+def _ensure_clapx():
+    """Return the (emb, meta) snapshot (or None). Kicks off a background
+    (re)build when new _clap.npz files appear (the backfill runs for hours)."""
+    now = time.time()
+    with _CLAPX_LOCK:
+        if not _CLAPX["building"] and now - _CLAPX["scan_t"] > 30:
+            _CLAPX["scan_t"] = now
+            n = len(glob.glob(os.path.join(LIBRARY_DIR, "*_clap.npz")))
+            if n != _CLAPX["files"] or _CLAPX["status"] == "idle":
+                _CLAPX["building"] = True
+                threading.Thread(target=_build_clapx, name="clapx", daemon=True).start()
+    return _CLAPX["data"]
+
+
+def _clap_text_vec(q_text):
+    v = _CLAP_QCACHE.get(q_text)
+    if v is not None:
+        return v
+    import torch
+    if _CLAP_TEXT["model"] is None:                 # text tower only, CPU (~450 MB)
+        from transformers import ClapTextModelWithProjection, AutoTokenizer
+        print(f"[clap] loading text encoder ({_CLAP_MODEL_ID}) ...")
+        _CLAP_TEXT["tok"] = AutoTokenizer.from_pretrained(_CLAP_MODEL_ID)
+        _CLAP_TEXT["model"] = ClapTextModelWithProjection.from_pretrained(_CLAP_MODEL_ID).eval()
+    with torch.no_grad():
+        toks = _CLAP_TEXT["tok"]([q_text], return_tensors="pt", padding=True)
+        e = _CLAP_TEXT["model"](**toks).text_embeds[0]
+        e = e / (e.norm() + 1e-9)
+    v = e.numpy().astype(np.float32)
+    if len(_CLAP_QCACHE) > 500:
+        _CLAP_QCACHE.clear()
+    _CLAP_QCACHE[q_text] = v
+    return v
+
+
+# ---------------------------------------------------------------------------
+# galaxy map — 2-D UMAP layout of every moment (computed by compute_galaxy.py).
+# Served as one compact binary blob the client parses into typed arrays:
+#   xy f32[2n] | t f32[n] | dur f32[n] | song_idx u32[n] | rgb u8[3n]
+# ---------------------------------------------------------------------------
+_GALAXY = None       # {"meta": {...}, "blob": bytes}
+_GALAXY_LOCK = threading.Lock()
+
+
+def _load_galaxy():
+    global _GALAXY
+    with _GALAXY_LOCK:
+        if _GALAXY is None:
+            p = os.path.join(LIBRARY_DIR, "galaxy.npz")
+            if not os.path.exists(p):
+                return None
+            g = np.load(p)
+            blob = (g["xy"].astype("<f4").tobytes()
+                    + g["t"].astype("<f4").tobytes()
+                    + g["dur"].astype("<f4").tobytes()
+                    + g["song_idx"].astype("<u4").tobytes()
+                    + g["rgb"].astype(np.uint8).tobytes())
+            _GALAXY = {"meta": {"n": int(g["t"].shape[0]),
+                                "song_ids": [str(s) for s in g["song_ids"]]},
+                       "blob": blob}
+            print(f"[galaxy] serving {_GALAXY['meta']['n']} points")
+        return _GALAXY
+
+
 _INCOMING = os.path.join(HERE, "_incoming")
 
 
@@ -604,6 +707,43 @@ class Handler(BaseHTTPRequestHandler):
                 track = q.get("track", ["full"])[0]
                 wav = song.playback_wav() if track in ("full", "") else song.track_wav(track)
                 return self._send(200, wav, "audio/wav", {"Accept-Ranges": "none"})
+
+            if path == "/api/textsearch":
+                q_text = q.get("q", [""])[0].strip()
+                if not q_text:
+                    return self._json({"error": "empty query"}, 400)
+                snap = _ensure_clapx()
+                if snap is None:
+                    return self._json({"status": _CLAPX["status"]}, 202)
+                k = max(1, min(50, int(q.get("k", ["20"])[0])))
+                emb, meta = snap
+                scores = emb @ _clap_text_vec(q_text)
+                order = np.argsort(-scores)
+                out, per_song = [], {}
+                for i in order:
+                    sid, s, e = meta[i]
+                    if per_song.get(sid, 0) >= 2:        # cap per song for variety
+                        continue
+                    per_song[sid] = per_song.get(sid, 0) + 1
+                    out.append({"song_id": sid, "title": sid, "start_t": s,
+                                "end_t": e, "score": float(scores[i])})
+                    if len(out) >= k:
+                        break
+                total = len(glob.glob(os.path.join(LIBRARY_DIR, "*_moments.npz")))
+                return self._json({"query": q_text, "results": out,
+                                   "coverage": {"songs": _CLAPX["files"], "total": total}})
+
+            if path == "/api/galaxy_meta":
+                g = _load_galaxy()
+                if g is None:
+                    return self._json({"error": "no galaxy.npz — run compute_galaxy.py"}, 404)
+                return self._json(g["meta"])
+
+            if path == "/api/galaxy_points":
+                g = _load_galaxy()
+                if g is None:
+                    return self._json({"error": "no galaxy"}, 404)
+                return self._send(200, g["blob"], "application/octet-stream")
 
             if path == "/api/clip":
                 song = get_song(q["id"][0])

@@ -42,6 +42,10 @@ const els = {
   simBtn: $("#sim-btn"), simPanel: $("#sim-panel"), simFacet: $("#sim-facet"),
   simRefresh: $("#sim-refresh"), simClose: $("#sim-close"),
   simSeed: $("#sim-seed"), simResults: $("#sim-results"),
+  simQ: $("#sim-q"), simQGo: $("#sim-q-go"),
+  galBtn: $("#gal-btn"), galaxy: $("#galaxy"), galCanvas: $("#gal-canvas"),
+  galTip: $("#gal-tip"), galStatus: $("#gal-status"), galClose: $("#gal-close"),
+  radioBtn: $("#radio-btn"), tbarNext: $("#tbar-next"), tbarNextLabel: $("#tbar-next-label"),
   readout: $("#readout"), ruler: $("#ruler"), tracks: $("#tracks"),
   overlay: $("#overlay"), overlayWrap: $("#overlay-wrap"),
   playhead: $("#playhead"), cursor: $("#cursor"), scroll: $("#scroll"),
@@ -95,8 +99,14 @@ async function init() {
   els.lyricsBtn.onclick = () => Lyrics.toggle();
   els.simBtn.onclick = () => Similar.toggle();
   els.simClose.onclick = () => Similar.toggle();
+  els.galBtn.onclick = () => Galaxy.toggle();
+  els.galClose.onclick = () => Galaxy.toggle();
+  els.radioBtn.onclick = () => Radio.toggle();
+  els.tbarNext.onclick = () => Radio.advance();        // skip to the queued track now
   els.simRefresh.onclick = () => Similar.find();
   els.simFacet.onchange = () => { Similar.facet = els.simFacet.value; Similar.find(); };
+  els.simQGo.onclick = () => Similar.textSearch();
+  els.simQ.onkeydown = e => { if (e.key === "Enter") Similar.textSearch(); };
   { const _h = document.querySelector("header"); if (_h) els.simPanel.style.top = _h.offsetHeight + "px"; }
   els.toggleSub.onclick = () => {               // collapse/expand ALL groups at once
     const groups = groupsWithChildren();
@@ -568,6 +578,7 @@ function setupInteractions() {
       els.addPanel.hidden = true; els.compPanel.hidden = true;
       els.dropOverlay.hidden = true;
       if (Lyrics.visible) Lyrics.toggle();
+      if (Galaxy.visible) Galaxy.toggle();
       if (e.target.blur) e.target.blur();
       return;
     }
@@ -838,6 +849,28 @@ const Similar = {
     }
   },
 
+  // text -> moment search over the whole library (CLAP embeddings)
+  async textSearch() {
+    const qt = els.simQ.value.trim();
+    if (!qt) return;
+    clearTimeout(this._poll);
+    els.simSeed.innerHTML = `searching for <b>“${escapeHtml(qt)}”</b>`;
+    els.simResults.innerHTML = `<div class="sim-empty">searching…</div>`;
+    let r;
+    try { r = await fetch(`/api/textsearch?q=${encodeURIComponent(qt)}&k=24`); }
+    catch { els.simResults.innerHTML = `<div class="sim-empty">request failed</div>`; return; }
+    if (r.status === 202) {                       // audio index still loading
+      els.simResults.innerHTML = `<div class="sim-empty">building sound index…</div>`;
+      this._poll = setTimeout(() => this.textSearch(), 2000);
+      return;
+    }
+    const d = await r.json().catch(() => null);
+    if (!d || d.error) { els.simResults.innerHTML = `<div class="sim-empty">${d ? escapeHtml(d.error) : "error"}</div>`; return; }
+    const cov = d.coverage || {};
+    els.simSeed.innerHTML = `<b>“${escapeHtml(qt)}”</b> · searched ${cov.songs || 0}/${cov.total || "?"} songs`;
+    this.render(d);
+  },
+
   // play just this moment through a lightweight side-channel <audio>, without
   // touching the main transport (beyond pausing it so they don't overlap)
   preview(res, btn, card) {
@@ -876,6 +909,338 @@ const Similar = {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+
+// ==========================================================================
+// Galaxy map — every moment of every song as a WebGL starfield (2-D UMAP of
+// the MERT embeddings, computed offline by compute_galaxy.py). Hover a star
+// to hear that moment; click to open the song there.
+// ==========================================================================
+const Galaxy = {
+  visible: false, _loaded: false, _loading: false,
+  n: 0, ids: [], xy: null, t: null, dur: null, sidx: null,
+  gl: null, _progs: null, _grid: null, _cell: 0.02,
+  view: { cx: 0, cy: 0, zoom: 0.9 },
+  _hover: -1, _prev: null, _prevIdx: -1, _dwell: null,
+  _ranges: null,                     // song_idx -> [first, count] (points are stored per-song contiguous)
+
+  toggle() {
+    this.visible = !this.visible;
+    els.galaxy.hidden = !this.visible;
+    els.galBtn.classList.toggle("on", this.visible);
+    if (this.visible) { this.load(); this.resize(); }
+    else this.stopPreview();
+  },
+
+  async load() {
+    if (this._loaded || this._loading) return;
+    this._loading = true;
+    try {
+      const meta = await fetch("/api/galaxy_meta").then(r => r.json());
+      if (meta.error) { els.galStatus.textContent = meta.error; return; }
+      const buf = await fetch("/api/galaxy_points").then(r => r.arrayBuffer());
+      const n = this.n = meta.n;
+      this.ids = meta.song_ids;
+      this.xy = new Float32Array(buf, 0, 2 * n);
+      this.t = new Float32Array(buf, 8 * n, n);
+      this.dur = new Float32Array(buf, 12 * n, n);
+      this.sidx = new Uint32Array(buf, 16 * n, n);
+      // per-song contiguous ranges (for highlighting the loaded song)
+      this._ranges = new Map();
+      for (let i = 0; i < n; i++) {
+        const s = this.sidx[i], r = this._ranges.get(s);
+        if (r) r[1]++; else this._ranges.set(s, [i, 1]);
+      }
+      // spatial hash for hover lookup
+      this._grid = new Map();
+      const cs = this._cell;
+      for (let i = 0; i < n; i++) {
+        const k = `${Math.floor(this.xy[2 * i] / cs)},${Math.floor(this.xy[2 * i + 1] / cs)}`;
+        const cell = this._grid.get(k);
+        if (cell) cell.push(i); else this._grid.set(k, [i]);
+      }
+      this.initGL(new Uint8Array(buf, 20 * n, 3 * n));
+      this._loaded = true;
+      els.galStatus.textContent = `${n.toLocaleString()} moments · ${this.ids.length} songs`;
+      this.render();
+    } catch (e) {
+      els.galStatus.textContent = "map failed to load";
+    } finally { this._loading = false; }
+  },
+
+  initGL(rgb) {
+    const gl = this.gl = els.galCanvas.getContext("webgl", { antialias: false, alpha: false });
+    const VS = `attribute vec2 a_pos; attribute vec3 a_col;
+      uniform vec2 u_off; uniform vec2 u_scale; uniform float u_size;
+      varying vec3 v_col;
+      void main() {
+        gl_Position = vec4((a_pos - u_off) * u_scale, 0., 1.);
+        gl_PointSize = u_size; v_col = a_col;
+      }`;
+    const FS = `precision mediump float; varying vec3 v_col; uniform float u_boost;
+      void main() {
+        float d = length(gl_PointCoord - .5);
+        if (d > .5) discard;
+        float a = smoothstep(.5, .12, d);
+        vec3 c = mix(v_col, vec3(1.), u_boost);
+        gl_FragColor = vec4(c * a, a);
+      }`;
+    const sh = (type, src) => {
+      const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      return s;
+    };
+    const p = gl.createProgram();
+    gl.attachShader(p, sh(gl.VERTEX_SHADER, VS));
+    gl.attachShader(p, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(p);
+    gl.useProgram(p);
+    this._progs = {
+      p,
+      a_pos: gl.getAttribLocation(p, "a_pos"), a_col: gl.getAttribLocation(p, "a_col"),
+      u_off: gl.getUniformLocation(p, "u_off"), u_scale: gl.getUniformLocation(p, "u_scale"),
+      u_size: gl.getUniformLocation(p, "u_size"), u_boost: gl.getUniformLocation(p, "u_boost"),
+    };
+    const posBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, this.xy, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(this._progs.a_pos);
+    gl.vertexAttribPointer(this._progs.a_pos, 2, gl.FLOAT, false, 0, 0);
+    const colBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, rgb, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(this._progs.a_col);
+    gl.vertexAttribPointer(this._progs.a_col, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);          // additive: overlapping stars glow
+    this.bindEvents();
+  },
+
+  resize() {
+    const c = els.galCanvas, d = DPR();
+    c.width = c.clientWidth * d; c.height = c.clientHeight * d;
+    if (this.gl) { this.gl.viewport(0, 0, c.width, c.height); this.render(); }
+  },
+
+  // world <-> screen. zoom=1 fits world [-1,1] vertically.
+  _scale() {
+    const c = els.galCanvas, aspect = c.clientWidth / Math.max(1, c.clientHeight);
+    return [this.view.zoom / aspect, this.view.zoom];
+  },
+  toWorld(px, py) {
+    const c = els.galCanvas, [sx, sy] = this._scale();
+    return [(2 * px / c.clientWidth - 1) / sx + this.view.cx,
+            (1 - 2 * py / c.clientHeight) / sy + this.view.cy];
+  },
+
+  render() {
+    const gl = this.gl;
+    if (!gl || !this.visible) return;
+    const P = this._progs, [sx, sy] = this._scale();
+    gl.clearColor(0.02, 0.02, 0.045, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.uniform2f(P.u_off, this.view.cx, this.view.cy);
+    gl.uniform2f(P.u_scale, sx, sy);
+    const base = clamp(1.6 * Math.sqrt(this.view.zoom) * DPR(), 1.5, 14);
+    gl.uniform1f(P.u_size, base);
+    gl.uniform1f(P.u_boost, 0);
+    gl.drawArrays(gl.POINTS, 0, this.n);
+    // highlight the loaded song's constellation
+    const cur = this.ids.indexOf(S.songId);
+    const r = cur >= 0 && this._ranges.get(cur);
+    if (r) {
+      gl.uniform1f(P.u_size, base * 2.2);
+      gl.uniform1f(P.u_boost, 0.55);
+      gl.drawArrays(gl.POINTS, r[0], r[1]);
+    }
+    if (this._hover >= 0) {
+      gl.uniform1f(P.u_size, base * 3.2);
+      gl.uniform1f(P.u_boost, 0.85);
+      gl.drawArrays(gl.POINTS, this._hover, 1);
+    }
+  },
+
+  nearest(wx, wy, maxWorld) {
+    const cs = this._cell, gx = Math.floor(wx / cs), gy = Math.floor(wy / cs);
+    const reach = Math.max(1, Math.ceil(maxWorld / cs));
+    let best = -1, bd = maxWorld * maxWorld;
+    for (let dx = -reach; dx <= reach; dx++)
+      for (let dy = -reach; dy <= reach; dy++) {
+        const cell = this._grid.get(`${gx + dx},${gy + dy}`);
+        if (!cell) continue;
+        for (const i of cell) {
+          const ddx = this.xy[2 * i] - wx, ddy = this.xy[2 * i + 1] - wy;
+          const d = ddx * ddx + ddy * ddy;
+          if (d < bd) { bd = d; best = i; }
+        }
+      }
+    return best;
+  },
+
+  bindEvents() {
+    const c = els.galCanvas;
+    let dragging = false, moved = false, lx = 0, ly = 0;
+    c.onpointerdown = ev => { dragging = true; moved = false; lx = ev.clientX; ly = ev.clientY; c.setPointerCapture(ev.pointerId); };
+    c.onpointerup = ev => {
+      dragging = false; c.releasePointerCapture(ev.pointerId);
+      if (!moved && this._hover >= 0) this.open(this._hover);
+    };
+    c.onpointermove = ev => {
+      if (dragging) {
+        const dx = ev.clientX - lx, dy = ev.clientY - ly;
+        if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+        const [sx, sy] = this._scale();
+        this.view.cx -= (2 * dx / c.clientWidth) / sx;
+        this.view.cy += (2 * dy / c.clientHeight) / sy;
+        lx = ev.clientX; ly = ev.clientY;
+        this.render();
+        return;
+      }
+      const rect = c.getBoundingClientRect();
+      const [wx, wy] = this.toWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+      const [, sy] = this._scale();
+      const i = this.nearest(wx, wy, (2 * 14 / c.clientHeight) / sy);   // ~14 px radius
+      if (i !== this._hover) {
+        this._hover = i;
+        this.render();
+        this.updateTip(i, ev.clientX, ev.clientY);
+        clearTimeout(this._dwell);
+        if (i >= 0) this._dwell = setTimeout(() => this.preview(i), 260);
+        else this.stopPreview();
+      } else if (i >= 0) {
+        els.galTip.style.left = (ev.clientX + 14) + "px";
+        els.galTip.style.top = (ev.clientY + 10) + "px";
+      }
+    };
+    c.onpointerleave = () => {
+      this._hover = -1; els.galTip.hidden = true;
+      clearTimeout(this._dwell); this.stopPreview(); this.render();
+    };
+    c.onwheel = ev => {
+      ev.preventDefault();
+      const rect = c.getBoundingClientRect();
+      const [wx, wy] = this.toWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+      const f = Math.pow(1.0015, -ev.deltaY);
+      this.view.zoom = clamp(this.view.zoom * f, 0.3, 400);
+      const [wx2, wy2] = this.toWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+      this.view.cx += wx - wx2; this.view.cy += wy - wy2;   // zoom toward cursor
+      this.render();
+    };
+    window.addEventListener("resize", () => this.visible && this.resize());
+  },
+
+  updateTip(i, cx, cy) {
+    if (i < 0) { els.galTip.hidden = true; return; }
+    els.galTip.innerHTML = `<b>${escapeHtml(this.ids[this.sidx[i]])}</b><span>@ ${lsTime(this.t[i])}</span>`;
+    els.galTip.style.left = (cx + 14) + "px";
+    els.galTip.style.top = (cy + 10) + "px";
+    els.galTip.hidden = false;
+  },
+
+  preview(i) {
+    if (this._prevIdx === i) return;
+    this.stopPreview();
+    if (Transport.playing) Transport.toggle();
+    const sid = this.ids[this.sidx[i]];
+    const s = Math.max(0, this.t[i] - this.dur[i] / 2), e = this.t[i] + this.dur[i] / 2 + 1.5;
+    const a = this._prev || (this._prev = new Audio());
+    a.src = `/api/clip?id=${encodeURIComponent(sid)}&start=${s.toFixed(2)}&end=${e.toFixed(2)}`;
+    a.volume = Math.min(1, Transport.masterVol);
+    a.play().catch(() => {});
+    this._prevIdx = i;
+  },
+
+  stopPreview() {
+    clearTimeout(this._dwell);
+    if (this._prev) { this._prev.pause(); this._prev.removeAttribute("src"); }
+    this._prevIdx = -1;
+  },
+
+  async open(i) {
+    const sid = this.ids[this.sidx[i]], t = Math.max(0, this.t[i] - this.dur[i] / 2);
+    this.stopPreview();
+    this.toggle();                                 // close the map
+    if (S.songId !== sid) {
+      els.song.value = sid;
+      await loadSong(sid);
+    }
+    Transport.seek(t);
+    if (!Transport.playing) await Transport.toggle();
+  },
+};
+
+// ==========================================================================
+// Infinite radio — when a song ends, walk the similarity graph into the next
+// one: the outro's closest moment elsewhere in the library becomes the entry
+// point of the next track. Facet follows the ✧ similar panel's selector.
+// ==========================================================================
+const Radio = {
+  on: false, _next: null, _picking: false, _advancing: false, history: [],
+
+  toggle() {
+    this.on = !this.on;
+    els.radioBtn.classList.toggle("on", this.on);
+    els.tbarNext.hidden = !this.on;
+    this._next = null;
+    this.showNext();
+    if (this.on && S.songId) this.pick();
+  },
+
+  async pick() {
+    if (this._picking || !S.meta || !S.songId) return;
+    this._picking = true;
+    try {
+      const t = Math.max(0, S.meta.duration - 15);       // seed from the outro
+      let cand = null;
+      try {
+        const r = await fetch(`/api/similar?id=${encodeURIComponent(S.songId)}` +
+                              `&t=${t.toFixed(2)}&facet=${Similar.facet}&k=12`);
+        if (r.ok) {
+          const d = await r.json();
+          const seen = new Set([S.songId, ...this.history]);
+          const fresh = (d.results || []).filter(x => !seen.has(x.song_id));
+          // prefer joining somewhere that leaves plenty of song left to play
+          cand = fresh.find(x => (x.start_t || 0) <= 180) || fresh[0] || null;
+        }
+      } catch {}
+      if (!cand) {                                       // index building / unknown song
+        const opts = [...els.song.options].map(o => o.value)
+          .filter(v => v !== S.songId && !this.history.includes(v));
+        const id = opts[Math.floor(Math.random() * opts.length)];
+        if (id) cand = { song_id: id, start_t: 0, score: 0 };
+      }
+      this._next = cand;
+      this.showNext();
+      // warm the server-side WAV cache so the switch is near-instant
+      if (cand) fetch(`/api/audio?id=${encodeURIComponent(cand.song_id)}`).catch(() => {});
+    } finally { this._picking = false; }
+  },
+
+  showNext() {
+    els.tbarNextLabel.textContent = this._next ? `${this._next.song_id}` : "…";
+    els.tbarNext.title = this._next
+      ? `up next: ${this._next.song_id} (joins at ${lsTime(this._next.start_t || 0)}) — click to skip there now`
+      : "picking the next track…";
+  },
+
+  async advance() {
+    if (this._advancing) return;
+    this._advancing = true;
+    try {
+      if (!this._next) await this.pick();
+      const nx = this._next;
+      this._next = null;
+      if (!nx) { Transport.pause(); return; }
+      this.history.push(S.songId);
+      if (this.history.length > 12) this.history.shift();
+      els.song.value = nx.song_id;
+      await loadSong(nx.song_id);
+      Transport.seek(Math.max(0, (nx.start_t || 0) - 1));
+      if (!Transport.playing) await Transport.toggle();
+      this.showNext();
+      this.pick();                                       // queue the following one
+    } finally { this._advancing = false; }
+  },
+};
 
 // ==========================================================================
 // WebAudio transport with solo / mute over decomposed components
@@ -1101,7 +1466,8 @@ const Transport = {
     if (this.playing) this.pause(); else await this.play();
   },
   async play() {
-    Similar.stopPreview();               // don't overlap a similarity preview
+    Similar.stopPreview();               // don't overlap side-channel previews
+    Galaxy.stopPreview();
     if (this.ac.state === "suspended") await this.ac.resume();
     this.offset = this.curTime(); this.startedAt = this.ac.currentTime; this.playing = true;
     els.play.textContent = "❚❚ pause"; els.play.classList.add("on");
@@ -1135,7 +1501,8 @@ const Transport = {
       TBar.update(this.curTime());
       if (this.playing) {
         const t = this.curTime(), span = S.view.end - S.view.start;
-        if (t >= S.meta.duration - 0.02) this.pause();
+        if (Radio.on && !Radio._next && S.meta.duration - t < 20) Radio.pick();
+        if (t >= S.meta.duration - 0.02) { if (Radio.on) Radio.advance(); else this.pause(); }
         else if (S.lock)                                  // scroll lock: keep centered
           setView(t - span / 2, t + span / 2);
         else if (span < S.meta.duration * 0.9 && (t > S.view.end - span * 0.08 || t < S.view.start))
