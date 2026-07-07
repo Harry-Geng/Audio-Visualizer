@@ -1175,6 +1175,8 @@ const Galaxy = {
 // ==========================================================================
 const Radio = {
   on: false, _next: null, _picking: false, _advancing: false, history: [],
+  FADE: 5, FADEIN: 3,                    // seconds: outro fade-out / entry fade-in
+  _fading: false, _fadeT: null, _fadeInPending: false,
 
   toggle() {
     this.on = !this.on;
@@ -1182,7 +1184,45 @@ const Radio = {
     els.tbarNext.hidden = !this.on;
     this._next = null;
     this.showNext();
+    if (!this.on) this.cancelFade();
     if (this.on && S.songId) this.pick();
+  },
+
+  // start easing the outro down; when it bottoms out, flow into the next track.
+  // (waiting for the literal last sample sounds abrupt — outros often just die.)
+  beginExit() {
+    if (this._fading || this._advancing || !Transport.playing) return;
+    this._fading = true;
+    const ac = Transport.ac, g = Transport.master.gain;
+    g.cancelScheduledValues(ac.currentTime);
+    g.setValueAtTime(Math.max(0.0001, g.value), ac.currentTime);
+    g.exponentialRampToValueAtTime(0.0001, ac.currentTime + this.FADE);
+    this._fadeT = setTimeout(() => {
+      if (Transport.playing) this.advance(); else this.cancelFade();
+    }, this.FADE * 1000);
+  },
+
+  cancelFade() {
+    clearTimeout(this._fadeT);
+    this._fadeInPending = false;
+    if (this._fading) {
+      const ac = Transport.ac, g = Transport.master.gain;
+      g.cancelScheduledValues(ac.currentTime);
+      g.setValueAtTime(Math.max(0.0001, Transport.masterVol), ac.currentTime);
+      this._fading = false;
+    }
+  },
+
+  // called by Transport.startSources at the instant new audio starts: if an
+  // entry fade is queued, ramp up from silence instead of snapping to full.
+  consumeFadeIn() {
+    if (!this._fadeInPending) return false;
+    this._fadeInPending = false;
+    const ac = Transport.ac, g = Transport.master.gain;
+    g.cancelScheduledValues(ac.currentTime);
+    g.setValueAtTime(0.0001, ac.currentTime);
+    g.linearRampToValueAtTime(Math.max(0.0001, Transport.masterVol), ac.currentTime + this.FADEIN);
+    return true;
   },
 
   async pick() {
@@ -1225,6 +1265,7 @@ const Radio = {
   async advance() {
     if (this._advancing) return;
     this._advancing = true;
+    clearTimeout(this._fadeT);
     try {
       if (!this._next) await this.pick();
       const nx = this._next;
@@ -1232,13 +1273,14 @@ const Radio = {
       if (!nx) { Transport.pause(); return; }
       this.history.push(S.songId);
       if (this.history.length > 12) this.history.shift();
+      this._fadeInPending = true;                        // ease the entry in
       els.song.value = nx.song_id;
       await loadSong(nx.song_id);
-      Transport.seek(Math.max(0, (nx.start_t || 0) - 1));
+      Transport.seek(Math.max(0, (nx.start_t || 0) - 2));
       if (!Transport.playing) await Transport.toggle();
       this.showNext();
       this.pick();                                       // queue the following one
-    } finally { this._advancing = false; }
+    } finally { this._advancing = false; this._fading = false; }
   },
 };
 
@@ -1259,7 +1301,13 @@ const Transport = {
 
   init() {
     this.ac = new (window.AudioContext || window.webkitAudioContext)();
-    this.master = this.ac.createGain(); this.master.connect(this.ac.destination);
+    this.master = this.ac.createGain();
+    // safety limiter: hot stem sums / boosted faders squash instead of clipping
+    this.limiter = this.ac.createDynamicsCompressor();
+    this.limiter.threshold.value = -3; this.limiter.knee.value = 0;
+    this.limiter.ratio.value = 20; this.limiter.attack.value = 0.002;
+    this.limiter.release.value = 0.15;
+    this.master.connect(this.limiter); this.limiter.connect(this.ac.destination);
     requestAnimationFrame(() => this.tick());
   },
   reset() {
@@ -1340,6 +1388,10 @@ const Transport = {
   stopSources() { for (const s of this.sources) { try { s.stop(); } catch {} } this.sources = []; },
 
   async startSources() {
+    // generation token: rapid re-entries (e.g. a fader drag crossing the
+    // full<->components boundary fires many refreshes while stems are still
+    // decoding) must NOT each start their own set of sources — last call wins.
+    const gen = this._gen = (this._gen || 0) + 1;
     this.stopSources();
     this.analysers = {};
     this.gainNodes = {};
@@ -1356,8 +1408,10 @@ const Transport = {
       const key = "scene:" + loadIds.join(",");
       this.activeKey = key;
       const bufs = await Promise.all(loadIds.map(id => this.load(id)));
-      if (!this.playing || this.activeKey !== key) return;
+      if (gen !== this._gen || !this.playing) return;   // superseded while decoding
       this.startedAt = this.ac.currentTime; this._starting = false;   // anchor clock to real audio start
+      if (!(typeof Radio !== "undefined" && Radio.consumeFadeIn()))
+        this.master.gain.value = this.masterVol;
       let k = 0;
       if (playFull) {
         const buf = bufs[k++];
@@ -1378,12 +1432,13 @@ const Transport = {
 
     const ids = this.resolve().play; this.activeKey = ids.join(",");
     const bufs = await Promise.all(ids.map(id => this.load(id)));
-    if (!this.playing || this.activeKey !== ids.join(",")) return;
+    if (gen !== this._gen || !this.playing) return;   // superseded while decoding
     this.startedAt = this.ac.currentTime; this._starting = false;   // anchor clock to real audio start
     this.gainNodes = {};
     const isFull = ids.length === 1 && ids[0] === "full";
     this._mode = isFull ? "full" : "components";
-    this.master.gain.value = this.masterVol;         // header dial = overall level
+    if (!(typeof Radio !== "undefined" && Radio.consumeFadeIn()))
+      this.master.gain.value = this.masterVol;       // header dial = overall level
     for (let i = 0; i < ids.length; i++) {
       const buf = bufs[i]; if (!buf) continue;
       const src = this.ac.createBufferSource(); src.buffer = buf;
@@ -1474,6 +1529,7 @@ const Transport = {
     await this.startSources();
   },
   pause() {
+    if (typeof Radio !== "undefined") Radio.cancelFade();
     this.offset = this.curTime(); this.stopSources(); this.playing = false;
     els.play.textContent = "▶ play"; els.play.classList.remove("on");
   },
@@ -1501,7 +1557,12 @@ const Transport = {
       TBar.update(this.curTime());
       if (this.playing) {
         const t = this.curTime(), span = S.view.end - S.view.start;
-        if (Radio.on && !Radio._next && S.meta.duration - t < 20) Radio.pick();
+        if (Radio.on) {
+          const left = S.meta.duration - t;
+          if (!Radio._next && left < 20) Radio.pick();
+          if (!Radio._fading && left <= Radio.FADE + 0.5) Radio.beginExit();
+          else if (Radio._fading && left > Radio.FADE + 3) Radio.cancelFade();  // scrubbed back
+        }
         if (t >= S.meta.duration - 0.02) { if (Radio.on) Radio.advance(); else this.pause(); }
         else if (S.lock)                                  // scroll lock: keep centered
           setView(t - span / 2, t + span / 2);
