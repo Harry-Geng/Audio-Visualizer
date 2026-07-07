@@ -337,8 +337,13 @@ def download_track(query, target_s, tmpdir):
     """
     import yt_dlp
 
+    # Optional: pull cookies from a logged-in browser (AV_COOKIES_BROWSER=brave|chrome|
+    # edge|firefox…) to get past age-gates and most bot-checks on retry passes.
+    _cb = os.environ.get("AV_COOKIES_BROWSER")
+    cookie_opt = {"cookiesfrombrowser": (_cb,)} if _cb else {}
+
     search_opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
-                   "skip_download": True}
+                   "skip_download": True, **cookie_opt}
     with yt_dlp.YoutubeDL(search_opts) as ydl:
         info = ydl.extract_info(f"ytsearch{SEARCH_N}:{query}", download=False)
     entries = [e for e in (info.get("entries") or []) if e]
@@ -357,6 +362,7 @@ def download_track(query, target_s, tmpdir):
         "outtmpl": os.path.join(tmpdir, "dl.%(ext)s"),
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "flac"}],
         "quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True,
+        **cookie_opt,
     }
     with yt_dlp.YoutubeDL(dl_opts) as ydl:
         ydl.download([page])
