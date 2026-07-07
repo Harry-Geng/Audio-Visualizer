@@ -319,6 +319,12 @@ footer {
   box-shadow: 0 0 4px rgba(0, 0, 0, .5);
 }
 #radio-btn.on { background: #2a3550; border-color: #ffb86a; color: #fff; }
+#tbar-join, #tbar-exit {                             /* radio transition markers */
+  position: absolute; top: -3px; bottom: -3px; width: 3px; border-radius: 2px;
+  transform: translateX(-1px); pointer-events: none;
+}
+#tbar-join { background: #6affc8; box-shadow: 0 0 5px rgba(106, 255, 200, .7); }
+#tbar-exit { background: #ffb86a; box-shadow: 0 0 5px rgba(255, 184, 106, .7); }
 #tbar-next {                                         /* radio "up next" chip */
   flex: 0 0 auto; display: flex; align-items: center; gap: 6px; max-width: 300px;
   padding: 4px 9px; border-radius: 6px; cursor: pointer;

@@ -46,6 +46,7 @@ const els = {
   galBtn: $("#gal-btn"), galaxy: $("#galaxy"), galCanvas: $("#gal-canvas"),
   galTip: $("#gal-tip"), galStatus: $("#gal-status"), galClose: $("#gal-close"),
   radioBtn: $("#radio-btn"), tbarNext: $("#tbar-next"), tbarNextLabel: $("#tbar-next-label"),
+  tbarJoin: $("#tbar-join"), tbarExit: $("#tbar-exit"),
   readout: $("#readout"), ruler: $("#ruler"), tracks: $("#tracks"),
   overlay: $("#overlay"), overlayWrap: $("#overlay-wrap"),
   playhead: $("#playhead"), cursor: $("#cursor"), scroll: $("#scroll"),
@@ -152,6 +153,7 @@ async function refreshSongs(selectId) {
 
 async function loadSong(id) {
   S.songId = id;
+  Radio._joinT = null;              // radio re-sets it right after when it drove the switch
   S.meta = await fetch("/api/song?id=" + encodeURIComponent(id)).then(r => r.json());
   document.title = `${id} — Microscope`;
 
@@ -781,6 +783,12 @@ const TBar = {
     this.cur.textContent = lsTime(t);
     this.dur.textContent = lsTime(dur);
     this.play.textContent = Transport.playing ? "❚❚" : "▶";
+    // radio transition markers: where we joined, where we'll leave
+    const exitT = dur - Radio.FADE - 0.5;
+    els.tbarExit.hidden = !(Radio.on && dur > 0 && exitT > 0);
+    if (!els.tbarExit.hidden) els.tbarExit.style.left = (exitT / dur * 100) + "%";
+    els.tbarJoin.hidden = !(Radio.on && dur > 0 && Radio._joinT != null);
+    if (!els.tbarJoin.hidden) els.tbarJoin.style.left = (Radio._joinT / dur * 100) + "%";
   },
 };
 
@@ -1177,6 +1185,7 @@ const Radio = {
   on: false, _next: null, _picking: false, _advancing: false, history: [],
   FADE: 5, FADEIN: 3,                    // seconds: outro fade-out / entry fade-in
   _fading: false, _fadeT: null, _fadeInPending: false,
+  _joinT: null, _nextBuf: null, _nextBufFor: null,
 
   toggle() {
     this.on = !this.on;
@@ -1197,9 +1206,11 @@ const Radio = {
     g.cancelScheduledValues(ac.currentTime);
     g.setValueAtTime(Math.max(0.0001, g.value), ac.currentTime);
     g.exponentialRampToValueAtTime(0.0001, ac.currentTime + this.FADE);
+    // hand off at ~70% of the fade: the exponential ramp is ≈ -56 dB there, so
+    // cutting the tail is inaudible and the next track starts with no dead air.
     this._fadeT = setTimeout(() => {
       if (Transport.playing) this.advance(); else this.cancelFade();
-    }, this.FADE * 1000);
+    }, this.FADE * 700);
   },
 
   cancelFade() {
@@ -1250,9 +1261,19 @@ const Radio = {
       }
       this._next = cand;
       this.showNext();
-      // warm the server-side WAV cache so the switch is near-instant
-      if (cand) fetch(`/api/audio?id=${encodeURIComponent(cand.song_id)}`).catch(() => {});
+      if (cand) this.predecode(cand.song_id);   // decode now → gapless switch later
     } finally { this._picking = false; }
+  },
+
+  // fetch + decode the next song's full mix during the outro, so the switch
+  // costs ~nothing (the buffer is handed straight to the transport).
+  async predecode(sid) {
+    this._nextBuf = null; this._nextBufFor = sid;
+    try {
+      const ab = await fetch(`/api/audio?id=${encodeURIComponent(sid)}`).then(r => r.arrayBuffer());
+      const buf = await Transport.ac.decodeAudioData(ab);
+      if (this._nextBufFor === sid) this._nextBuf = buf;   // still the queued track
+    } catch {}
   },
 
   showNext() {
@@ -1276,7 +1297,12 @@ const Radio = {
       this._fadeInPending = true;                        // ease the entry in
       els.song.value = nx.song_id;
       await loadSong(nx.song_id);
-      Transport.seek(Math.max(0, (nx.start_t || 0) - 2));
+      if (this._nextBuf && this._nextBufFor === nx.song_id)
+        Transport.buffers.set("full", this._nextBuf);    // pre-decoded: no decode gap
+      this._nextBuf = null; this._nextBufFor = null;
+      const joinT = Math.max(0, (nx.start_t || 0) - 2);
+      Transport.seek(joinT);
+      this._joinT = joinT;                               // ⟟ marker in the seek bar
       if (!Transport.playing) await Transport.toggle();
       this.showNext();
       this.pick();                                       // queue the following one
