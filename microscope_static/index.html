@@ -52,6 +52,7 @@
     <button id="live-btn">● live</button>
     <button id="scene-btn">✦ scene</button>
     <button id="lyrics-btn" title="synced lyrics (karaoke)">☰ lyrics</button>
+    <button id="sim-btn" title="find moments across the library that sound like the current spot">✧ similar</button>
     <div class="spacer"></div>
     <div class="readout" id="readout"></div>
   </header>
@@ -124,6 +125,25 @@
       <div id="ls-title"></div>
       <button id="ls-close" title="exit lyric view (esc)">✕</button>
     </div>
+  </div>
+
+  <div id="sim-panel">
+    <div class="sim-head">
+      <span class="sim-h-title">✧ similar moments</span>
+      <select id="sim-facet" title="which aspect to match on">
+        <option value="mix">whole sound</option>
+        <option value="vocals">vocals</option>
+        <option value="bass">bass</option>
+        <option value="drums">drums</option>
+        <option value="melody">melody</option>
+        <option value="rhythm">rhythm feel</option>
+        <option value="texture">texture</option>
+      </select>
+      <button id="sim-refresh" title="search from the current playhead position">⟳ here</button>
+      <button id="sim-close" title="close">✕</button>
+    </div>
+    <div id="sim-seed"></div>
+    <div id="sim-results"></div>
   </div>
 
   <footer>

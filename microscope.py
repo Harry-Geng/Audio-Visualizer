@@ -22,6 +22,7 @@ at any zoom. No third-party web deps: stdlib http.server + a tiny PNG encoder.
 import io
 import os
 import re
+import glob
 import json
 import uuid
 import zlib
@@ -322,6 +323,29 @@ class Song:
         self._play_wav = buf.getvalue()
         return self._play_wav
 
+    def clip_wav(self, start, end):
+        """Small WAV slice for similarity previews. Reads only the needed
+        frames straight from disk — never triggers a full song load."""
+        src = self.orig_path or stem_file(self.stems_dir, "mix")
+        if src is None:
+            return None
+        with sf.SoundFile(src) as f:
+            sr = f.samplerate
+            a = max(0, min(int(start * sr), f.frames))
+            b = max(a, min(int(end * sr), f.frames))
+            f.seek(a)
+            y = f.read(b - a, dtype="float32", always_2d=True)
+        if not self.orig_path:            # analysis mix is unnormalized mono
+            y = y / (np.abs(y).max() + 1e-9) * 0.9
+        pcm16 = (np.clip(y, -1, 1) * 32767).astype("<i2")
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(y.shape[1])
+            w.setsampwidth(2)
+            w.setframerate(int(sr))
+            w.writeframes(pcm16.tobytes())
+        return buf.getvalue()
+
     def track_wav(self, name):
         """22 kHz mono WAV of one decomposed component, for solo/mute mixing.
         All components share one scale (the mix peak) so soloed levels are
@@ -434,6 +458,77 @@ def register_song(song_id, stems_dir):
     print(f"  + ingested: {song_id}")
 
 
+# ---------------------------------------------------------------------------
+# moment similarity index — loads every *_moments.npz into one in-RAM kNN index
+# (~1.3 GB for the full library). Built once in a background thread so the server
+# stays responsive; queries are fast weighted-cosine matmuls.
+# ---------------------------------------------------------------------------
+_MINDEX = None
+_MINDEX_STATE = {"status": "idle", "loaded": 0, "total": 0}
+_MINDEX_LOCK = threading.Lock()
+_MINDEX_SONGROWS = {}      # song_id -> [(row, moment_idx, start_t, end_t)] for seeding
+
+# UI facet name -> query weights over the stored facets
+_SIM_FACETS = {
+    "mix":     {"emb_mix": 1.0},
+    "vocals":  {"emb_vocals": 1.0},
+    "bass":    {"emb_bass": 1.0},
+    "drums":   {"emb_drums": 1.0},
+    "melody":  {"emb_other": 1.0},
+    "rhythm":  {"interactions": 1.0},
+    "texture": {"descriptors": 1.0},
+}
+
+
+def _build_mindex():
+    global _MINDEX, _MINDEX_SONGROWS
+    try:
+        from moment_index import MomentIndex
+        files = sorted(glob.glob(os.path.join(LIBRARY_DIR, "*_moments.npz")))
+        _MINDEX_STATE.update(total=len(files), loaded=0, status="building")
+        idx = MomentIndex()
+        for i, f in enumerate(files):
+            try:
+                idx.add_file(f)
+            except Exception as e:
+                print(f"[moments] skip {os.path.basename(f)}: {e}")
+            _MINDEX_STATE["loaded"] = i + 1
+        idx.finalize()
+        songrows = {}
+        for r, (sid, mi, s0, s1) in enumerate(idx.rows):
+            songrows.setdefault(sid, []).append((r, mi, s0, s1))
+        _MINDEX_SONGROWS = songrows
+        _MINDEX = idx
+        _MINDEX_STATE["status"] = "ready"
+        print(f"[moments] similarity index ready: {len(idx.rows)} moments / {len(files)} songs")
+    except Exception as e:
+        _MINDEX_STATE.update(status="error", error=str(e))
+        print(f"[moments] index build failed: {e}")
+
+
+def _ensure_mindex():
+    with _MINDEX_LOCK:
+        if _MINDEX_STATE["status"] in ("idle", "error"):
+            _MINDEX_STATE.update(status="building", loaded=0)
+            threading.Thread(target=_build_mindex, name="mindex", daemon=True).start()
+    return _MINDEX
+
+
+def _seed_moment(song_id, t):
+    """Resolve a playback time to that song's moment index (containing, else nearest)."""
+    rows = _MINDEX_SONGROWS.get(song_id)
+    if not rows:
+        return None
+    best, bestd = rows[0][1], 1e18
+    for (_r, mi, s0, s1) in rows:
+        if s0 <= t <= s1:
+            return mi
+        d = min(abs(t - s0), abs(t - s1))
+        if d < bestd:
+            bestd, best = d, mi
+    return best
+
+
 _INCOMING = os.path.join(HERE, "_incoming")
 
 
@@ -510,6 +605,18 @@ class Handler(BaseHTTPRequestHandler):
                 wav = song.playback_wav() if track in ("full", "") else song.track_wav(track)
                 return self._send(200, wav, "audio/wav", {"Accept-Ranges": "none"})
 
+            if path == "/api/clip":
+                song = get_song(q["id"][0])
+                if not song:
+                    return self._json({"error": "not found"}, 404)
+                start = max(0.0, float(q.get("start", ["0"])[0]))
+                end = float(q.get("end", [str(start + 6.0)])[0])
+                end = max(start + 0.25, min(end, start + 20.0))
+                wav = song.clip_wav(start, end)
+                if wav is None:
+                    return self._json({"error": "no audio"}, 404)
+                return self._send(200, wav, "audio/wav", {"Accept-Ranges": "none"})
+
             if path == "/api/lyrics":
                 p = os.path.join(LIBRARY_DIR, f"{q['id'][0]}_lyrics.json")
                 if not os.path.exists(p):
@@ -520,6 +627,39 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/job":
                 j = ingest.get_job(q.get("id", [""])[0])
                 return self._json(j or {"error": "not found"}, 200 if j else 404)
+
+            if path == "/api/sim_status":
+                return self._json(dict(_MINDEX_STATE))
+
+            if path == "/api/similar":
+                idx = _ensure_mindex()
+                if idx is None:                         # still building → tell the UI
+                    return self._json({"status": _MINDEX_STATE["status"],
+                                       "loaded": _MINDEX_STATE["loaded"],
+                                       "total": _MINDEX_STATE["total"]}, 202)
+                sid = q.get("id", [""])[0]
+                if sid not in _SONGS:
+                    return self._json({"error": "unknown song"}, 404)
+                facet = q.get("facet", ["mix"])[0]
+                weights = _SIM_FACETS.get(facet, _SIM_FACETS["mix"])
+                k = max(1, min(40, int(q.get("k", ["12"])[0])))
+                mi = int(q["moment"][0]) if "moment" in q else _seed_moment(sid, float(q.get("t", ["0"])[0]))
+                if mi is None:
+                    return self._json({"error": "no moments for song"}, 404)
+                try:
+                    res = idx.query(sid, mi, weights=weights, k=k, exclude_same_song=True)
+                except KeyError:
+                    return self._json({"error": "moment not in index"}, 404)
+                seed = next(((s0, s1) for (_r, m2, s0, s1) in _MINDEX_SONGROWS.get(sid, [])
+                             if m2 == mi), (0.0, 0.0))
+                for r in res:
+                    r["title"] = r["song_id"]
+                return self._json({
+                    "facet": facet,
+                    "seed": {"song_id": sid, "moment_idx": mi,
+                             "start_t": seed[0], "end_t": seed[1]},
+                    "results": res,
+                })
 
             return self._json({"error": "not found"}, 404)
         except (KeyError, ValueError) as e:
@@ -603,6 +743,7 @@ def main():
     print(f"Found {len(_SONGS)} song(s):")
     for sid in sorted(_SONGS):
         print(f"  - {sid}")
+    _ensure_mindex()          # start loading the moment-similarity index in the background
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}"
     print(f"\n  Music Microscope → {url}\n  (Ctrl-C to stop)")

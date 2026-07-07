@@ -39,6 +39,9 @@ const els = {
   compBtn: $("#comp-btn"), compPanel: $("#comp-panel"),
   resetSm: $("#reset-sm"), toggleSub: $("#toggle-sub"), masterVol: $("#master-vol"),
   lyricsBtn: $("#lyrics-btn"), lyricsPanel: $("#lyrics-panel"),
+  simBtn: $("#sim-btn"), simPanel: $("#sim-panel"), simFacet: $("#sim-facet"),
+  simRefresh: $("#sim-refresh"), simClose: $("#sim-close"),
+  simSeed: $("#sim-seed"), simResults: $("#sim-results"),
   readout: $("#readout"), ruler: $("#ruler"), tracks: $("#tracks"),
   overlay: $("#overlay"), overlayWrap: $("#overlay-wrap"),
   playhead: $("#playhead"), cursor: $("#cursor"), scroll: $("#scroll"),
@@ -90,6 +93,11 @@ async function init() {
   els.masterVol.oninput = () => Transport.setMaster(parseFloat(els.masterVol.value));
   els.masterVol.ondblclick = () => { els.masterVol.value = 1; Transport.setMaster(1); };
   els.lyricsBtn.onclick = () => Lyrics.toggle();
+  els.simBtn.onclick = () => Similar.toggle();
+  els.simClose.onclick = () => Similar.toggle();
+  els.simRefresh.onclick = () => Similar.find();
+  els.simFacet.onchange = () => { Similar.facet = els.simFacet.value; Similar.find(); };
+  { const _h = document.querySelector("header"); if (_h) els.simPanel.style.top = _h.offsetHeight + "px"; }
   els.toggleSub.onclick = () => {               // collapse/expand ALL groups at once
     const groups = groupsWithChildren();
     const allCollapsed = groups.every(g => S.collapsed.has(g));
@@ -766,6 +774,110 @@ const TBar = {
 };
 
 // ==========================================================================
+// Moment similarity explorer — "find moments across the library that sound like
+// the current spot". Queries /api/similar (MERT moment kNN) and lets you jump to
+// any result, which loads that song and plays from the matching moment.
+// ==========================================================================
+const Similar = {
+  visible: false, facet: "mix", _poll: null,
+  _prev: null, _prevBtn: null, _prevCard: null,   // inline preview player state
+
+  toggle() {
+    this.visible = !this.visible;
+    document.body.classList.toggle("sim-on", this.visible);
+    els.simBtn.classList.toggle("on", this.visible);
+    clearTimeout(this._poll);
+    if (this.visible) this.find();
+    else this.stopPreview();
+  },
+
+  async find() {
+    if (!this.visible) return;
+    if (!S.songId || !S.meta) { els.simResults.innerHTML = `<div class="sim-empty">load a song first</div>`; return; }
+    const t = Transport.curTime();
+    els.simSeed.innerHTML = `matching <b>${escapeHtml(els.song.selectedOptions[0]?.textContent || S.songId)}</b> @ ${lsTime(t)}`;
+    els.simResults.innerHTML = `<div class="sim-empty">searching…</div>`;
+    const url = `/api/similar?id=${encodeURIComponent(S.songId)}&t=${t.toFixed(2)}&facet=${this.facet}&k=16`;
+    let r;
+    try { r = await fetch(url); } catch { els.simResults.innerHTML = `<div class="sim-empty">request failed</div>`; return; }
+    if (r.status === 202) {                       // index still building → poll
+      const s = await r.json().catch(() => ({}));
+      const pct = s.total ? Math.round((s.loaded / s.total) * 100) : 0;
+      els.simResults.innerHTML = `<div class="sim-empty">building similarity index… ${pct}% (${s.loaded || 0}/${s.total || 0})</div>`;
+      clearTimeout(this._poll);
+      this._poll = setTimeout(() => this.find(), 1500);
+      return;
+    }
+    const d = await r.json().catch(() => null);
+    if (!d || d.error) { els.simResults.innerHTML = `<div class="sim-empty">${d ? escapeHtml(d.error) : "error"}</div>`; return; }
+    this.render(d);
+  },
+
+  render(d) {
+    els.simResults.innerHTML = "";
+    const rs = d.results || [];
+    if (!rs.length) { els.simResults.innerHTML = `<div class="sim-empty">no matches</div>`; return; }
+    for (const res of rs) {
+      const card = document.createElement("div"); card.className = "sim-card";
+      const bar = document.createElement("div"); bar.className = "sim-bar";
+      bar.style.width = Math.max(6, res.score * 100).toFixed(0) + "%";
+      const pv = document.createElement("button"); pv.className = "sim-play"; pv.textContent = "▶";
+      pv.title = "preview this moment";
+      const info = document.createElement("div"); info.className = "sim-info";
+      const title = document.createElement("span"); title.className = "sim-title"; title.textContent = res.title;
+      const meta = document.createElement("span"); meta.className = "sim-time";
+      meta.textContent = `${lsTime(res.start_t)}  ·  ${res.score.toFixed(2)}`;
+      const open = document.createElement("button"); open.className = "sim-open"; open.textContent = "↗";
+      open.title = "open this song here";
+      info.append(title, meta); card.append(bar, pv, info, open);
+      // card + ▶ both preview inline; only the small ↗ switches the whole app
+      pv.onclick = ev => { ev.stopPropagation(); this.preview(res, pv, card); };
+      open.onclick = ev => { ev.stopPropagation(); this.jump(res.song_id, res.start_t); };
+      card.onclick = () => this.preview(res, pv, card);
+      els.simResults.appendChild(card);
+    }
+  },
+
+  // play just this moment through a lightweight side-channel <audio>, without
+  // touching the main transport (beyond pausing it so they don't overlap)
+  preview(res, btn, card) {
+    if (this._prevBtn === btn) { this.stopPreview(); return; }   // toggle off
+    this.stopPreview();
+    if (Transport.playing) Transport.toggle();
+    const a = this._prev || (this._prev = new Audio());
+    a.src = `/api/clip?id=${encodeURIComponent(res.song_id)}` +
+            `&start=${res.start_t.toFixed(2)}&end=${(res.end_t + 2).toFixed(2)}`;
+    a.volume = Math.min(1, Transport.masterVol);
+    a.onended = () => this.stopPreview();
+    a.play().catch(() => this.stopPreview());
+    btn.textContent = "■"; card.classList.add("previewing");
+    this._prevBtn = btn; this._prevCard = card;
+  },
+
+  stopPreview() {
+    if (this._prev) { this._prev.pause(); this._prev.removeAttribute("src"); }
+    if (this._prevBtn) this._prevBtn.textContent = "▶";
+    if (this._prevCard) this._prevCard.classList.remove("previewing");
+    this._prevBtn = this._prevCard = null;
+  },
+
+  async jump(songId, t) {
+    this.stopPreview();
+    if (S.songId !== songId) {
+      els.song.value = songId;
+      await loadSong(songId);
+    }
+    Transport.seek(t);
+    if (!Transport.playing) await Transport.toggle();
+    if (this.visible) this.find();                // chain discovery from the new spot
+  },
+};
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// ==========================================================================
 // WebAudio transport with solo / mute over decomposed components
 // ==========================================================================
 const Transport = {
@@ -989,6 +1101,7 @@ const Transport = {
     if (this.playing) this.pause(); else await this.play();
   },
   async play() {
+    Similar.stopPreview();               // don't overlap a similarity preview
     if (this.ac.state === "suspended") await this.ac.resume();
     this.offset = this.curTime(); this.startedAt = this.ac.currentTime; this.playing = true;
     els.play.textContent = "❚❚ pause"; els.play.classList.add("on");
