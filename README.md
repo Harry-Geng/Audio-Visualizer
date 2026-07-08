@@ -111,6 +111,12 @@ multi-candidate search). See the top of each file for details. These are optiona
 only). Your audio, your separated stems, and your library never leave your
 computer — this is like running the separation tools at home, because it is.
 
+## License
+
+Code is [MIT licensed](LICENSE) — use, modify, and share it freely. Note that
+the *music* you analyze is your own responsibility: keep it to personal use and
+respect the rights of the works you download or import.
+
 ## Troubleshooting
 
 - **"No module named numpy" / app won't start** — run `setup.bat` first (or you
