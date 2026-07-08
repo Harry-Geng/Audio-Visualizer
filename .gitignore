@@ -41,3 +41,6 @@ spotify_creds.json
 spotify_token.json
 batch_log.jsonl
 *.csv
+
+# personal machine-specific scheduler wrapper (hardcoded local paths)
+_run_overnight.ps1
