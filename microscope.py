@@ -39,8 +39,20 @@ import soundfile as sf
 import librosa
 from scipy.signal import butter, sosfiltfilt
 
-import ingest
 from config import SR, HOP_LENGTH, STEM_NAMES, LIBRARY_DIR, stem_file
+
+# Hosted preview mode (e.g. a public demo on a CPU host): the "add music" ingest
+# path needs a GPU + model downloads, so it's disabled and the frontend shows a
+# small demo badge instead. Set AV_DEMO=1 to enable.
+DEMO = bool(os.environ.get("AV_DEMO"))
+
+# `ingest` pulls in demucs + the whole separation stack. In demo mode we serve
+# only pre-processed songs and never separate, so skip that heavy import — the
+# demo image then needs none of the GPU / separation dependencies.
+if DEMO:
+    ingest = None
+else:
+    import ingest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "microscope_static")  # code, ships with the app
@@ -668,6 +680,9 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/static/"):
                 return self._serve_static(path[len("/static/"):])
 
+            if path == "/api/appinfo":
+                return self._json({"demo": DEMO, "songs": len(_SONGS)})
+
             if path == "/api/songs":
                 return self._json([
                     {"id": sid, "title": sid} for sid in sorted(_SONGS)
@@ -765,6 +780,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, f.read(), "application/json")
 
             if path == "/api/job":
+                if ingest is None:
+                    return self._json({"error": "not found"}, 404)
                 j = ingest.get_job(q.get("id", [""])[0])
                 return self._json(j or {"error": "not found"}, 200 if j else 404)
 
@@ -813,6 +830,9 @@ class Handler(BaseHTTPRequestHandler):
         hq = q.get("hq", ["0"])[0] == "1"
         drums = q.get("drums", ["0"])[0] == "1"
         six = q.get("six", ["0"])[0] == "1"
+        if DEMO:                                   # hosted preview: no server-side ingest
+            return self._json({"error": "Adding music is disabled in the demo. "
+                               "Run it locally to analyze your own library."}, 403)
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = self._read_exact(length)
@@ -870,13 +890,14 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description="Music Microscope server")
-    ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)))
+    ap.add_argument("--host", default=os.environ.get("AV_HOST", "127.0.0.1"))
     args = ap.parse_args()
 
     global _SONGS
     _SONGS = discover_songs()
-    ingest.on_song_ready = register_song
+    if ingest is not None:
+        ingest.on_song_ready = register_song
     if not _SONGS:
         print("No songs yet — drop a file or paste a URL in the browser to add one.")
 

@@ -1,0 +1,9 @@
+# Runtime dependencies for the HOSTED DEMO only (see docs/deploy-demo.md).
+# The demo serves a PRE-PROCESSED library and never separates audio, so it needs
+# none of the heavy separation stack (demucs / audio-separator / yt-dlp / onnx).
+# PyTorch (CPU wheel) is installed separately in the Dockerfile.
+numpy==2.4.6
+scipy==1.17.1
+soundfile==0.14.0
+librosa==0.11.0
+transformers==5.12.1

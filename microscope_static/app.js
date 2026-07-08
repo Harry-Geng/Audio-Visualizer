@@ -84,6 +84,20 @@ async function init() {
   els.song.innerHTML = songs.map(s => `<option value="${s.id}">${s.title}</option>`).join("");
   els.song.onchange = () => loadSong(els.song.value);
 
+  // hosted preview: no server-side ingest, so hide "add music" + flag it as a demo
+  fetch("/api/appinfo").then(r => r.json()).then(info => {
+    if (!info.demo) return;
+    document.body.classList.add("demo");
+    if (els.addBtn) els.addBtn.style.display = "none";
+    const badge = document.createElement("a");
+    badge.id = "demo-badge";
+    badge.href = "https://github.com/Harry-Geng/Audio-Visualizer";
+    badge.target = "_blank"; badge.rel = "noopener";
+    badge.textContent = "◆ demo — run it locally for your own library";
+    const header = document.querySelector("header");
+    if (header) header.appendChild(badge);
+  }).catch(() => {});
+
   els.mode.querySelectorAll("button").forEach(b => b.onclick = () => {
     S.mode = b.dataset.mode;
     els.mode.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));

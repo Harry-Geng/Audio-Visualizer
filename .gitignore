@@ -44,3 +44,8 @@ batch_log.jsonl
 
 # personal machine-specific scheduler wrapper (hardcoded local paths)
 _run_overnight.ps1
+
+# hosted-demo data: built locally by build_demo_library.py and pushed to the
+# Space repo, not to this code repo (contains audio)
+demo_library/
+demo_songs/

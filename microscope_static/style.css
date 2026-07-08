@@ -431,6 +431,14 @@ body.sim-on #sim-panel { display: flex; }
 }
 #gal-close:hover { background: #2a3550; border-color: #b48cff; }
 
+#demo-badge {
+  margin-left: 8px; padding: 4px 10px; border-radius: 12px;
+  background: linear-gradient(90deg, #7fd0ff22, #b48cff22);
+  border: 1px solid #7fd0ff55; color: #cfe4ff; font-size: 11px;
+  text-decoration: none; white-space: nowrap; flex: 0 0 auto;
+}
+#demo-badge:hover { border-color: #7fd0ff; color: #fff; }
+
 footer .hints { margin-left: auto; }
 #legend { display: flex; gap: 6px; }
 #legend .lg {
