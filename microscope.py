@@ -779,6 +779,13 @@ class Handler(BaseHTTPRequestHandler):
                 with open(p, "rb") as f:
                     return self._send(200, f.read(), "application/json")
 
+            if path == "/api/vibe":
+                p = os.path.join(LIBRARY_DIR, f"{q['id'][0]}_vibe.json")
+                if not os.path.exists(p):
+                    return self._json({"error": "no vibe data — run compute_vibe.py"}, 404)
+                with open(p, "rb") as f:
+                    return self._send(200, f.read(), "application/json")
+
             if path == "/api/job":
                 if ingest is None:
                     return self._json({"error": "not found"}, 404)

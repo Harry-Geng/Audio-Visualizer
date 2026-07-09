@@ -1441,31 +1441,45 @@ const Transport = {
     if (this.sceneMode && typeof Scene !== "undefined" && Scene.allInstrumentIds) {
       // Audio = full-quality original (unless soloing/muting); per-instrument
       // stems play SILENTLY into analysers so the visuals stay reactive.
+      // Audio must NOT wait for the analysers: HQ songs have ~12 stems ×
+      // ~40MB, and blocking on all of them held playback hostage for many
+      // seconds (read as "play is broken"). Start the audible buffer(s) as
+      // soon as they decode; stream each silent stem in as it arrives.
       const instIds = Scene.allInstrumentIds();
       const aud = Scene.audibleSet();              // "FULL" or Set of audible ids
       const playFull = aud === "FULL";
-      const loadIds = playFull ? ["full", ...instIds] : instIds;
-      const key = "scene:" + loadIds.join(",");
-      this.activeKey = key;
-      const bufs = await Promise.all(loadIds.map(id => this.load(id)));
+      const audibleIds = playFull ? ["full"] : instIds.filter(id => aud.has(id));
+      this.activeKey = "scene:" + audibleIds.join(",") + "+" + instIds.join(",");
+      const started = new Set();
+      const attach = (id, buf, audible) => {       // instrument: analyser → gain → master
+        const src = this.ac.createBufferSource(); src.buffer = buf;
+        const an = this.ac.createAnalyser(); an.fftSize = 2048; an.smoothingTimeConstant = 0.6;
+        const g = this.ac.createGain();
+        g.gain.value = (audible ? 1 : 0) * this.rowVol(id);
+        src.connect(an); an.connect(g); g.connect(this.master);
+        this.analysers[id] = an; this.gainNodes[id] = g;
+        // late arrivals join the running clock at the right position
+        const pos = off + Math.max(0, this.ac.currentTime - this.startedAt);
+        if (pos < buf.duration) { src.start(0, pos); this.sources.push(src); }
+        started.add(id);
+      };
+      const bufs = await Promise.all(audibleIds.map(id => this.load(id)));
       if (gen !== this._gen || !this.playing) return;   // superseded while decoding
       this.startedAt = this.ac.currentTime; this._starting = false;   // anchor clock to real audio start
       if (!(typeof Radio !== "undefined" && Radio.consumeFadeIn()))
         this.master.gain.value = this.masterVol;
-      let k = 0;
       if (playFull) {
-        const buf = bufs[k++];
+        const buf = bufs[0];
         if (buf) { const s = this.ac.createBufferSource(); s.buffer = buf; s.connect(this.master); s.start(0, Math.min(off, buf.duration)); this.sources.push(s); }
+      } else {
+        audibleIds.forEach((id, i) => bufs[i] && attach(id, bufs[i], true));
       }
-      for (const id of instIds) {
-        const buf = bufs[k++]; if (!buf) continue;
-        const src = this.ac.createBufferSource(); src.buffer = buf;
-        const an = this.ac.createAnalyser(); an.fftSize = 2048; an.smoothingTimeConstant = 0.6;
-        const g = this.ac.createGain();
-        g.gain.value = ((!playFull && aud.has(id)) ? 1 : 0) * this.rowVol(id);
-        src.connect(an); an.connect(g); g.connect(this.master);
-        this.analysers[id] = an; this.gainNodes[id] = g;
-        src.start(0, Math.min(off, buf.duration)); this.sources.push(src);
+      for (const id of instIds) {                  // silent analyser stems, best-effort
+        if (started.has(id)) continue;
+        this.load(id).then(buf => {
+          if (gen !== this._gen || !this.playing || !buf) return;
+          attach(id, buf, false);
+        }).catch(() => {});
       }
       return;
     }

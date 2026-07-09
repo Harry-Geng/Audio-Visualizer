@@ -25,8 +25,12 @@ const Scene = {
   kit: {}, chroma: new Array(12).fill(0), voxHz: 0, voxLvl: 0, voxTrail: [], voxHist: [], bassHz: 0,
   frame: 0, voxXs: 0, voxYs: 0, voxLvlS: 0, pitchBuf: [],
   lyrics: null, lyWords: null,            // per-song lyrics + flattened word list (t/end)
-  // WebGL mandala (lazy-initialised on first use)
-  gl: null, glProg: null, glCanvas: null, glU: null, glFailed: false, mandalaRot: 0, _chromaArr: null,
+  // shared WebGL harness (lazy-initialised; program cache in glProgs)
+  gl: null, glCanvas: null, glProgs: null, glQuadBuf: null, glFailed: false, mandalaRot: 0, _chromaArr: null,
+  // semantic vibe — slow mood axes from /api/vibe (CLAP text-axis projections),
+  // eased toward the current moment's values; drives the liquid/weather/drift views
+  vibeData: null, flux: 0,
+  vibe: { bright: 0.5, warm: 0.5, dense: 0.5, tense: 0.5, euphoric: 0.5, vast: 0.5 },
 
   _lerp(a, b, t) { return a + (b - a) * t; },
 
@@ -134,6 +138,7 @@ const Scene = {
     this.beats = (S.meta.features && S.meta.features.beats) || [];
     this.builtFor = S.songId;
     this.loadLyrics(S.songId);
+    this.loadVibe(S.songId);
     this.buildHUD();
   },
 
@@ -194,6 +199,39 @@ const Scene = {
   },
   inst(id) { return this.insts.find(o => o.id === id); },
 
+  loadVibe(songId) {
+    this.vibeData = null;
+    fetch("/api/vibe?id=" + encodeURIComponent(songId))
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (S.songId === songId && d && d.t && d.t.length) this.vibeData = d; })
+      .catch(() => {});
+  },
+  // ease this.vibe toward the timeline's value at t (lerped between ~4s moment
+  // midpoints). No vibe data → coarse audio-derived proxies so views still move.
+  updateVibe(t) {
+    const V = this.vibe, d = this.vibeData;
+    let tgt;
+    if (d) {
+      const ts = d.t;
+      let lo = 0, hi = ts.length - 1;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (ts[m] < t) lo = m + 1; else hi = m; }
+      const i1 = lo, i0 = Math.max(0, lo - 1);
+      const k = ts[i1] > ts[i0] ? clamp((t - ts[i0]) / (ts[i1] - ts[i0]), 0, 1) : 0;
+      tgt = {};
+      for (const a of d.axes) { const arr = d.v[a]; tgt[a] = arr[i0] + (arr[i1] - arr[i0]) * k; }
+    } else {
+      let hi3 = 0, tot = 0, lvl = 0;
+      for (const o of this.insts) { hi3 += o.bands[2]; tot += o.bands[0] + o.bands[1] + o.bands[2]; lvl += o.smooth; }
+      lvl /= Math.max(1, this.insts.length);
+      const brightP = tot > 1e-6 ? hi3 / tot : 0.5;
+      tgt = { bright: clamp(brightP * 2.2, 0, 1), warm: clamp(1 - brightP * 1.6, 0, 1),
+              dense: clamp(lvl * 2.5, 0, 1), tense: clamp(this.flux * 3, 0, 1),
+              euphoric: 0.5, vast: 0.5 };
+    }
+    const e = 1 - Math.exp(-this.dt / 1.2);      // ~1.2s time constant: mood drifts, never jumps
+    for (const k2 in V) if (tgt[k2] != null) V[k2] += (tgt[k2] - V[k2]) * e;
+  },
+
   sample() {
     const t = Transport.curTime ? Transport.curTime() : 0;
     let beat = 0;
@@ -251,6 +289,10 @@ const Scene = {
     // rolling pitch history for the pitch-roll view (0 = silent/unvoiced → gap)
     this.pitchBuf.push({ vox: this.voxHz, bass: bl > 0.03 ? this.bassHz : 0 });
     if (this.pitchBuf.length > 480) this.pitchBuf.shift();
+    // onset flux (liquid turbulence / weather gusts) + semantic vibe easing
+    let fx = 0; for (const o of this.insts) fx += o.onset;
+    this.flux = this.flux * 0.85 + fx * 0.15;
+    this.updateVibe(t);
     return { t, beat };
   },
 
@@ -335,63 +377,83 @@ const Scene = {
     return s;
   },
 
-  ensureGL() {
+  // shared WebGL context + compile-once program cache. Every GL style (mandala,
+  // liquid, weather, drift) draws on the same #scene-gl canvas through these.
+  glInit() {
     if (this.gl) return this.gl;
     if (this.glFailed) return null;
     const c = this.glCanvas = document.getElementById("scene-gl");
-    const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
+    const gl = c.getContext("webgl", { alpha: false }) || c.getContext("experimental-webgl");
     if (!gl) { this.glFailed = true; return null; }
-    const vs = this._glShader(gl, gl.VERTEX_SHADER, "attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }");
-    const fs = this._glShader(gl, gl.FRAGMENT_SHADER, this.MANDALA_FS);
-    if (!vs || !fs) { this.glFailed = true; return null; }
-    const prog = gl.createProgram();
-    gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.error("link:", gl.getProgramInfoLog(prog)); this.glFailed = true; return null; }
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    this.glProgs = {};
+    this.glQuadBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.glQuadBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW); // full-screen triangle
-    const loc = gl.getAttribLocation(prog, "p");
-    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-    this.glU = {
-      res: gl.getUniformLocation(prog, "u_res"), time: gl.getUniformLocation(prog, "u_time"),
-      chroma: gl.getUniformLocation(prog, "u_chroma[0]"), beat: gl.getUniformLocation(prog, "u_beat"),
-      bass: gl.getUniformLocation(prog, "u_bass"), energy: gl.getUniformLocation(prog, "u_energy"),
-      rot: gl.getUniformLocation(prog, "u_rot"),
-    };
-    this.gl = gl; this.glProg = prog;
+    this.gl = gl;
     return gl;
   },
-
-  renderMandala(f) {
-    const gl = this.ensureGL();
-    if (!gl) {  // WebGL unavailable — keep the 2D canvas with a notice
-      this.canvas.style.display = "block";
-      if (this.glCanvas) this.glCanvas.style.display = "none";
-      const ctx = this.ctx; ctx.fillStyle = "#06070d"; ctx.fillRect(0, 0, this.W, this.H);
-      ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = "13px ui-monospace, monospace"; ctx.textAlign = "center";
-      ctx.fillText("WebGL unavailable — mandala needs it", this.W / 2, this.H / 2); ctx.textAlign = "left";
-      return;
-    }
+  // P.u(name)/P.a(name) cache uniform/attribute locations per program
+  glProgram(name, fsSrc, vsSrc) {
+    if (this.glProgs[name] !== undefined) return this.glProgs[name];
+    const gl = this.gl;
+    const vs = this._glShader(gl, gl.VERTEX_SHADER, vsSrc || "attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }");
+    const fs = this._glShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+    if (!vs || !fs) return (this.glProgs[name] = null);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.error(name + " link:", gl.getProgramInfoLog(prog)); return (this.glProgs[name] = null); }
+    const uloc = {}, aloc = {};
+    return (this.glProgs[name] = {
+      prog,
+      u: n => (n in uloc ? uloc[n] : (uloc[n] = gl.getUniformLocation(prog, n))),
+      a: n => (n in aloc ? aloc[n] : (aloc[n] = gl.getAttribLocation(prog, n))),
+    });
+  },
+  glDrawQuad(P) {
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.glQuadBuf);
+    const loc = P.a("p");
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  },
+  // show the GL canvas (hiding the 2D one) sized to device pixels; returns [w, h]
+  glShowCanvas() {
     this.canvas.style.display = "none";
     this.glCanvas.style.display = "block";
     const w = Math.max(1, Math.round(this.W * this.dpr)), h = Math.max(1, Math.round(this.H * this.dpr));
     if (this.glCanvas.width !== w || this.glCanvas.height !== h) { this.glCanvas.width = w; this.glCanvas.height = h; }
+    return [w, h];
+  },
+  glNotice(msg) {  // WebGL unavailable — keep the 2D canvas with a notice
+    this.canvas.style.display = "block";
+    if (this.glCanvas) this.glCanvas.style.display = "none";
+    const ctx = this.ctx; ctx.fillStyle = "#06070d"; ctx.fillRect(0, 0, this.W, this.H);
+    ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = "13px ui-monospace, monospace"; ctx.textAlign = "center";
+    ctx.fillText(msg, this.W / 2, this.H / 2); ctx.textAlign = "left";
+  },
+
+  renderMandala(f) {
+    const gl = this.glInit();
+    const P = gl && this.glProgram("mandala", this.MANDALA_FS);
+    if (!P) return this.glNotice("WebGL unavailable — mandala needs it");
+    const [w, h] = this.glShowCanvas();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h);
     this.mandalaRot += this.dt * 0.08 + f.beat * 0.05;          // drift + a kick on every beat
     let energy = 0; for (const o of this.insts) energy += o.smooth; energy /= Math.max(1, this.insts.length);
     const bass = (this.inst("bass") || {}).smooth || 0;
     if (!this._chromaArr) this._chromaArr = new Float32Array(12);
     for (let i = 0; i < 12; i++) this._chromaArr[i] = this.chroma[i] || 0;
-    const U = this.glU;
-    gl.useProgram(this.glProg);
-    gl.uniform2f(U.res, w, h);
-    gl.uniform1f(U.time, this.clock);
-    gl.uniform1fv(U.chroma, this._chromaArr);
-    gl.uniform1f(U.beat, f.beat);
-    gl.uniform1f(U.bass, Math.min(1, bass * 1.5));
-    gl.uniform1f(U.energy, Math.min(1, energy * 1.5));
-    gl.uniform1f(U.rot, this.mandalaRot);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.useProgram(P.prog);
+    gl.uniform2f(P.u("u_res"), w, h);
+    gl.uniform1f(P.u("u_time"), this.clock);
+    gl.uniform1fv(P.u("u_chroma[0]"), this._chromaArr);
+    gl.uniform1f(P.u("u_beat"), f.beat);
+    gl.uniform1f(P.u("u_bass"), Math.min(1, bass * 1.5));
+    gl.uniform1f(P.u("u_energy"), Math.min(1, energy * 1.5));
+    gl.uniform1f(P.u("u_rot"), this.mandalaRot);
+    this.glDrawQuad(P);
   },
 
   loop() {
@@ -407,8 +469,11 @@ const Scene = {
     if (!this.insts.length) { ctx.fillStyle = "#04050a"; ctx.fillRect(0, 0, W, H); return; }
     this.autoYaw += 0.0015; this.frame++;
     const f = this.sample();
-    // mandala is rendered on a separate WebGL canvas; everything else on the 2D one
+    // GL styles render on the separate WebGL canvas; everything else on the 2D one
     if (this.style === "mandala") { this.renderMandala(f); this.syncHUD(); return; }
+    if (typeof VibeScenes !== "undefined" && VibeScenes.has(this.style)) {
+      VibeScenes.render(this.style, f); this.syncHUD(); return;
+    }
     if (this.glCanvas) this.glCanvas.style.display = "none";
     this.canvas.style.display = "block";
     if (this.style === "stage") this.renderStage(ctx, W, H, f);

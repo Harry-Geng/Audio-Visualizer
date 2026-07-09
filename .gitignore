@@ -31,6 +31,8 @@ _incoming/
 *_lyrics.json
 # CLAP text-search embeddings (per-song) + galaxy-map layout — regenerable
 *_clap.npz
+# vibe axes (per-song, regenerable via compute_vibe.py)
+*_vibe.json
 galaxy.npz
 
 # logs
