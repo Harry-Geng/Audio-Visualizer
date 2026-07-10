@@ -1,0 +1,32 @@
+\chapter{Filters, Onsets, and Beats \emph{(outline)}}\label{ch:filters}
+\chapterlede{How the project isolates frequency bands, detects the instant a
+drum is struck, and infers a tempo grid from a noisy sequence of onsets.}
+
+\begin{incode}
+Status: outline. To be written against \texttt{feature\_extractor.py} (onset
+envelopes, beat tracking) and the legacy Butterworth drum-band split that
+DrumSep replaced.
+\end{incode}
+
+Planned contents:
+\begin{itemize}
+  \item \textbf{LTI systems and convolution.} Impulse response, frequency
+  response as the DFT of the kernel; why filtering is multiplication in
+  frequency (convolution theorem, with proof).
+  \item \textbf{Butterworth filters.} Maximally-flat magnitude response
+  $\abs{H(\omega)}^2 = 1/(1 + (\omega/\omega_c)^{2n})$; biquad
+  implementation; phase distortion and why the legacy kick/snare/hat split
+  smeared transients.
+  \item \textbf{Onset detection.} Spectral flux
+  $\sum_k \max(0, \abs{X[m,k]} - \abs{X[m-1,k]})$; logarithmic compression;
+  adaptive thresholding (moving median) --- and the scene-mode variant: the
+  per-piece peak-normalized onset gate in \texttt{scene.js} that lets a quiet
+  hi-hat register next to a loud kick.
+  \item \textbf{Beat tracking as dynamic programming.} Tempo estimation via
+  the autocorrelation of the onset envelope; the Ellis DP recurrence
+  $D(t) = O(t) + \max_\tau \big(D(t - \tau) - \lambda
+  \log^2(\tau/\tau_0)\big)$; backtracking; why breakdowns and rubato break
+  it.
+  \item \textbf{Sections and phrases.} Self-similarity matrices over chroma
+  and timbre features; novelty kernels; the checkerboard detector.
+\end{itemize}

@@ -1,0 +1,40 @@
+\chapter{The Mathematics of Rendering \emph{(outline)}}\label{ch:shaders}
+\chapterlede{Everything the visualizer draws is mathematics executed sixty
+times a second: procedural noise, divergence-free flow fields, radial
+symmetry groups, perspective projection, and color spaces.}
+
+\begin{incode}
+Status: outline. To be written against \texttt{scene.js} (mandala shader,
+stage projection) and \texttt{vibescenes.js} (liquid advection, weather FBM,
+drift camera).
+\end{incode}
+
+Planned contents:
+\begin{itemize}
+  \item \textbf{Hash, value noise, and fBm.} Lattice noise with smoothstep
+  interpolation ($C^1$ but not $C^2$ --- and where that artifact is visible);
+  fractional Brownian motion $\sum_k a^k\, n(2^k p)$, its spectrum, and the
+  self-similarity parameter.
+  \item \textbf{Curl noise.} In 2-D, the stream-function construction
+  $v = (\partial_y \psi, -\partial_x \psi)$; \emph{theorem:}
+  $\nabla \cdot v = 0$ (incompressible flow --- why the liquid view folds
+  instead of draining); finite-difference curl and its step-size tradeoff.
+  \item \textbf{Semi-Lagrangian advection.} The backward-lookup scheme
+  $D_{t+1}(p) = D_t(p - v\,\Delta t)$; unconditional stability; numerical
+  diffusion as implicit blur, exploited deliberately as dye decay.
+  \item \textbf{Kaleidoscopes as group actions.} The dihedral group
+  $D_{12}$ acting on the plane; folding $\theta$ into a fundamental domain
+  via $\abs{\theta - s\lfloor \theta/s \rceil}$; why chroma's 12 pitch
+  classes make this the \emph{honest} symmetry group for harmony.
+  \item \textbf{Perspective projection.} The stage view's camera
+  (\texttt{project()} in \texttt{scene.js}): yaw/pitch rotations as matrix
+  products, similar triangles for the focal divide, painter's-algorithm
+  depth sorting.
+  \item \textbf{Color.} HSL/HSV as cylindrical re-parameterizations of RGB;
+  hue arithmetic on the circle; why the vibe palette interpolates hue rather
+  than RGB (avoiding desaturated midpoints); gamma and additive blending in
+  the drift view.
+  \item \textbf{Feedback systems.} Ping-pong framebuffers as discrete
+  dynamical systems $D_{t+1} = f(D_t) + \text{input}_t$; contraction (decay
+  $< 1$) as the guarantee the liquid never blows up.
+\end{itemize}

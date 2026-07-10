@@ -1,0 +1,319 @@
+\chapter{From Sound to Vectors}\label{ch:sound}
+\chapterlede{Everything in this project begins by turning pressure waves into
+arrays of numbers, and arrays of numbers into frequencies. This chapter builds
+the discrete Fourier transform from scratch, proves the identities the rest of
+the book leans on, and ends at the two workhorse measurements the visualizer
+makes sixty times per second: the spectrogram and the autocorrelation pitch
+estimate.}
+
+\section{Sampling}
+
+A microphone measures a continuous function $x_c : \R \to \R$ (air pressure
+against time). Computers store countably many numbers, so we sample.
+
+\begin{definition}[Sampling]\label{def:sampling}
+Given a continuous signal $x_c$ and a \emph{sampling rate} $f_s > 0$ (in Hz),
+the sampled signal is the sequence
+\[
+x[n] = x_c\!\left(\tfrac{n}{f_s}\right), \qquad n \in \Z .
+\]
+\end{definition}
+
+Sampling destroys information in general: infinitely many continuous signals
+agree on any given sample sequence. The classical theorem says that
+\emph{bandlimited} signals are the exception.
+
+\begin{theorem}[Nyquist--Shannon]\label{thm:nyquist}
+Let $x_c$ be bandlimited to $B$ Hz, meaning its continuous Fourier transform
+vanishes outside $[-B, B]$. If $f_s > 2B$, then $x_c$ is uniquely determined
+by its samples $x[n]$, and can be reconstructed as
+\[
+x_c(t) \;=\; \sum_{n \in \Z} x[n] \,
+\operatorname{sinc}\!\big(f_s t - n\big),
+\qquad \operatorname{sinc}(u) = \frac{\sin(\pi u)}{\pi u}.
+\]
+\end{theorem}
+
+\begin{proof}[Proof idea]
+Bandlimitedness means the Fourier transform $\hat{x}_c$ is supported on
+$[-B,B]$. Sampling in time corresponds to \emph{periodizing} in frequency:
+the transform of the sample train is $\sum_k \hat{x}_c(f - k f_s)$, a sum of
+copies of $\hat{x}_c$ spaced $f_s$ apart. If $f_s > 2B$ the copies do not
+overlap, so multiplying by the indicator of $[-f_s/2, f_s/2]$ recovers
+$\hat{x}_c$ exactly; that multiplication in frequency is convolution with the
+sinc kernel in time.
+\end{proof}
+
+When $f_s \le 2B$ the copies overlap and distinct frequencies become
+indistinguishable after sampling --- \emph{aliasing}: a tone at frequency $f$
+is captured identically to one at $f_s - f$.
+
+\begin{incode}
+The project stores two versions of every stem
+(\texttt{ingest.py}): a listening copy at $f_s = 44{,}100$ Hz stereo
+(Nyquist frequency $22.05$ kHz, above human hearing) and an analysis copy at
+$f_s = 22{,}050$ Hz mono (\texttt{config.py}: \texttt{SR = 22050}), which is
+cheaper to process and still covers content up to $11$ kHz --- plenty for
+beat, pitch, and chroma analysis. Every resample (e.g.\ to MERT's $24$ kHz in
+\texttt{embeddings.py}, or CLAP's $48$ kHz in \texttt{backfill\_clap.py})
+must low-pass first for exactly the reason in
+Theorem~\ref{thm:nyquist}; \texttt{librosa.resample} does this internally.
+\end{incode}
+
+\section{The Discrete Fourier Transform}
+
+Fix a frame length $N$ and view a chunk of signal as a vector
+$x = (x[0], \dots, x[N-1]) \in \C^N$.
+
+\begin{definition}[DFT]\label{def:dft}
+Let $\omega_N = e^{-2\pi i / N}$. The \emph{discrete Fourier transform} of
+$x \in \C^N$ is $X \in \C^N$ with
+\[
+X[k] \;=\; \sum_{n=0}^{N-1} x[n]\, \omega_N^{kn}
+\;=\; \sum_{n=0}^{N-1} x[n]\, e^{-2\pi i k n / N},
+\qquad k = 0, \dots, N-1 .
+\]
+\end{definition}
+
+The DFT is the change of basis into the family of sampled complex sinusoids
+$e_k[n] = e^{2\pi i k n / N}$. That family is orthogonal:
+
+\begin{lemma}[Orthogonality]\label{lem:orth}
+For $k, \ell \in \{0, \dots, N-1\}$,
+\[
+\sum_{n=0}^{N-1} e^{2\pi i (k-\ell) n / N} =
+\begin{cases}
+N & k = \ell,\\
+0 & k \ne \ell.
+\end{cases}
+\]
+\end{lemma}
+
+\begin{proof}
+If $k = \ell$ every term is $1$. Otherwise let
+$q = e^{2\pi i (k-\ell)/N} \ne 1$; the sum is geometric:
+$\sum_{n=0}^{N-1} q^n = \frac{q^N - 1}{q - 1}$,
+and $q^N = e^{2\pi i (k - \ell)} = 1$, so the numerator vanishes.
+\end{proof}
+
+\begin{corollary}[Inversion and Parseval]\label{cor:parseval}
+$x[n] = \frac{1}{N}\sum_{k=0}^{N-1} X[k]\, e^{2\pi i k n/N}$, and
+\[
+\sum_{n=0}^{N-1} \abs{x[n]}^2 \;=\; \frac{1}{N} \sum_{k=0}^{N-1}
+\abs{X[k]}^2 .
+\]
+\end{corollary}
+
+\begin{proof}
+Substitute Definition~\ref{def:dft} into the claimed inverse and swap the two
+finite sums; Lemma~\ref{lem:orth} collapses the inner sum to $N\,
+\mathbf{1}[n = m]$. Parseval follows by expanding
+$\abs{X[k]}^2 = X[k]\overline{X[k]}$ and applying the lemma once more.
+\end{proof}
+
+Parseval is the statement that \emph{energy is preserved}: what the ear hears
+as loudness can be measured either per-sample or per-frequency-bin. The
+visualizer uses both sides of this identity (RMS level on the time side, band
+energy on the frequency side).
+
+\begin{remark}[What a bin means]\label{rem:bins}
+Bin $k$ of an $N$-point DFT at sampling rate $f_s$ represents frequency
+\[
+f_k = \frac{k \, f_s}{N} \quad \text{Hz}, \qquad k \le N/2,
+\]
+so the frequency resolution is $\Delta f = f_s / N$: longer frames see finer
+pitch differences. For a real signal, $X[N-k] = \overline{X[k]}$, so only the
+first $N/2 + 1$ bins carry information.
+\end{remark}
+
+\begin{incode}
+The chroma computation in \texttt{scene.js}
+(\texttt{computeChroma}) inverts Remark~\ref{rem:bins}: it walks the
+analyser's bins and maps each to its frequency via
+\texttt{fr = bin * sr / nfft} before folding onto pitch classes
+(Appendix~\ref{ch:temperament}). With \texttt{fftSize = 1024} at
+$f_s = 44.1$ kHz, $\Delta f \approx 43$ Hz --- coarse at the bottom of the
+piano (the gap between $A1$ and $B\flat1$ is only $3.3$ Hz) and luxurious at
+the top. This asymmetry between linear bins and logarithmic musical pitch
+recurs throughout the project.
+\end{incode}
+
+\section{The Fast Fourier Transform}
+
+Computing Definition~\ref{def:dft} literally costs $N$ multiplications for
+each of $N$ bins: $\Theta(N^2)$. The FFT gets the same numbers in
+$\Theta(N \log N)$.
+
+\begin{theorem}[Cooley--Tukey]\label{thm:fft}
+Let $N$ be even, and split $x$ into even- and odd-indexed halves with DFTs
+$E$ and $O$ (each of length $N/2$). Then for $k = 0, \dots, N/2 - 1$:
+\[
+X[k] = E[k] + \omega_N^{k}\, O[k], \qquad
+X[k + N/2] = E[k] - \omega_N^{k}\, O[k].
+\]
+Consequently, for $N = 2^m$, the DFT can be computed in
+$\Theta(N \log N)$ operations.
+\end{theorem}
+
+\begin{proof}
+Split the defining sum by parity of $n$, writing $n = 2r$ and $n = 2r + 1$:
+\[
+X[k] = \sum_{r=0}^{N/2-1} x[2r]\, \omega_N^{2rk}
+     + \omega_N^{k} \sum_{r=0}^{N/2-1} x[2r+1]\, \omega_N^{2rk}
+     = E[k] + \omega_N^k O[k],
+\]
+using $\omega_N^2 = \omega_{N/2}$. The second identity follows from
+$\omega_N^{k + N/2} = -\omega_N^{k}$. The cost recurrence
+$T(N) = 2\,T(N/2) + \Theta(N)$ solves to $\Theta(N \log N)$ by the master
+theorem.
+\end{proof}
+
+This is why every frame size in the project is a power of two
+(\texttt{fftSize} of $1024$, $2048$): the browser's
+\texttt{AnalyserNode} and NumPy's FFT both rely on this factorization.
+
+\section{Frames, Windows, and the Spectrogram}
+
+Music is not stationary --- the whole point is that its frequency content
+changes. The fix is to transform short \emph{frames} and accept a tradeoff.
+
+\begin{definition}[STFT and spectrogram]\label{def:stft}
+Fix a frame length $N$, a hop $H \le N$, and a window
+$w : \{0,\dots,N-1\} \to [0,1]$. The \emph{short-time Fourier transform} of
+$x$ is
+\[
+X[m, k] = \sum_{n=0}^{N-1} x[mH + n]\, w[n]\, e^{-2\pi i k n / N},
+\]
+and the \emph{spectrogram} is the matrix of squared magnitudes
+$S[m,k] = \abs{X[m,k]}^2$.
+\end{definition}
+
+Without a window ($w \equiv 1$), chopping the signal introduces artificial
+discontinuities at frame edges, and Definition~\ref{def:dft} smears each true
+frequency across all bins (\emph{spectral leakage}). A smooth taper such as
+the Hann window
+\[
+w[n] = \tfrac{1}{2}\Big(1 - \cos\tfrac{2\pi n}{N-1}\Big)
+\]
+concentrates that leakage into nearby bins at the price of slightly widening
+each spectral peak.
+
+\begin{remark}[Time--frequency tradeoff]\label{rem:uncertainty}
+$\Delta f = f_s / N$ improves with longer frames while time localization
+$\Delta t = N / f_s$ worsens \emph{in exact inverse proportion}:
+$\Delta t \cdot \Delta f = 1$ regardless of $N$. This is the discrete shadow
+of the uncertainty principle. There is no window that beats it; one can only
+choose where to spend it. Musical consequence: a system tuned to see bass
+notes precisely (long frames) necessarily blurs drum onsets, and vice versa.
+\end{remark}
+
+\begin{incode}
+The microscope's spectrogram view (\texttt{microscope.py},
+\texttt{spectrogram\_png}) renders $\log(1 + S)$ rather than $S$ --- the log
+compresses the enormous dynamic range of music ($\sim$60 dB between a hi-hat
+tail and a kick) into the few dozen brightness levels an eye can
+distinguish, then maps it through the magma colormap. The scene mode's live
+analysis instead uses the browser's \texttt{AnalyserNode}
+(\texttt{app.js}, \texttt{bands()}), which computes
+Definition~\ref{def:stft} with a built-in Blackman window at
+\texttt{fftSize = 1024}: $\Delta t \approx 23$ ms, $\Delta f \approx 43$ Hz
+--- the ``spend it on time'' end of Remark~\ref{rem:uncertainty}, correct for
+a visualizer chasing drum hits.
+\end{incode}
+
+\section{Pitch by Autocorrelation}
+
+The spectrogram spreads a note's energy across its harmonics; for
+\emph{monophonic} sources (one note at a time --- bass, a single voice) a
+time-domain method finds the fundamental more directly.
+
+\begin{definition}[Autocorrelation]\label{def:acf}
+The (unnormalized, windowed) autocorrelation of $x$ at lag $\tau \ge 0$ over
+a window of length $W$ is
+\[
+r[\tau] = \sum_{n=0}^{W-1} x[n]\, x[n + \tau].
+\]
+\end{definition}
+
+\begin{proposition}[Periodicity peaks]\label{prop:acfpeak}
+Suppose $x$ is $P$-periodic on the relevant range, i.e.\ $x[n + P] = x[n]$.
+Then $r[\tau] \le r[0]$ for all $\tau$, with equality at every multiple of
+$P$: $r[0] = r[P] = r[2P] = \cdots$
+\end{proposition}
+
+\begin{proof}
+Equality at multiples of $P$ is immediate from periodicity. For the bound,
+Cauchy--Schwarz gives
+\[
+r[\tau] = \ip*{\,x_{0:W},\, x_{\tau:\tau+W}}
+\le \norm{x_{0:W}} \, \norm{x_{\tau:\tau+W}} = r[0],
+\]
+where the final equality uses periodicity again (both windows contain the
+same multiset of values when $W$ is a whole number of periods).
+\end{proof}
+
+So the algorithm is: compute $r[\tau]$ over a plausible range of lags, find
+the peak, and report $f_0 = f_s / \tau^\ast$. Two practical failure modes
+matter. First, $r$ peaks equally at $2P, 3P, \dots$, so noise can make the
+estimator jump down an octave (choosing $2P$) --- the classic \emph{octave
+error}. Second, on silence or noise the global maximum is meaningless, so an
+energy gate must precede the search.
+
+\begin{incode}
+\texttt{Transport.pitchHz} in \texttt{app.js} is
+Definition~\ref{def:acf} verbatim: window $W = 512$ samples, lag range
+$f_s/320 \le \tau \le f_s/50$ (i.e.\ candidate fundamentals between $50$ and
+$320$ Hz --- the playable range of a bass guitar), and an RMS gate of
+$0.012$ before searching. The stutter you once saw in the bass fret marker
+was octave error plus frame-to-frame noise; the mitigations in
+\texttt{scene.js} (sampling every third frame, level-gating, exponential
+smoothing $0.7/0.3$) treat the symptoms. The planned cure --- an offline
+pitch tracker with Viterbi smoothing across the whole song --- replaces the
+per-frame $\argmax$ with a globally optimal path and will live in the ingest
+pipeline.
+\end{incode}
+
+\section*{Exercises}
+
+\begin{exercise}
+A pure $9$ kHz tone is sampled at $f_s = 16$ kHz with no anti-aliasing
+filter. What frequency is heard on playback? Generalize: give the perceived
+frequency as a function of true frequency $f$ and $f_s$.
+\end{exercise}
+
+\begin{exercise}
+Prove the conjugate-symmetry claim of Remark~\ref{rem:bins}: if
+$x[n] \in \R$ for all $n$, then $X[N - k] = \overline{X[k]}$. How many real
+numbers are needed to store the DFT of a real signal, and why does this not
+contradict the DFT being invertible?
+\end{exercise}
+
+\begin{exercise}
+Complete the proof of Corollary~\ref{cor:parseval} in full detail, justifying
+the interchange of summations.
+\end{exercise}
+
+\begin{exercise}
+Show that the Hann window satisfies
+$\sum_{m \in \Z} w[n - mH] = \text{const}$ when $H = N/2$ (perfect overlap-add
+at 50\% hop). Why does this property matter for reconstructing audio from a
+modified STFT --- for instance, in mask-based source separation
+(Chapter~\ref{ch:separation})?
+\end{exercise}
+
+\begin{exercise}[computational]
+Record or load a bass stem from your library. Implement
+Definition~\ref{def:acf} and plot $r[\tau]$ for one frame during a held note.
+Identify the fundamental's peak and at least one octave-error peak. Then
+break the estimator on purpose: find a frame where the $\argmax$ lands at
+$2P$.
+\end{exercise}
+
+\begin{exercise}
+Using Remark~\ref{rem:uncertainty}: the microscope wants to distinguish
+$E1$ ($41.2$ Hz) from $F1$ ($43.7$ Hz) in the bass register. What minimum
+frame length (in samples at $22{,}050$ Hz, and in milliseconds) does a plain
+DFT need? Roughly how many kick drum hits at $170$ BPM occur within one such
+frame? Conclude something about why the project analyzes bass pitch and drum
+onsets with different tools.
+\end{exercise}

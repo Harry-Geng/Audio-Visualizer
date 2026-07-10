@@ -1,0 +1,399 @@
+\chapter{Maps of Timbre Space: PCA and UMAP}\label{ch:timbre}
+\chapterlede{The galaxy view draws every moment of every song as a star, and
+similar-sounding moments land near each other. This chapter contains the
+complete mathematics of that map: from $768$-dimensional learned embeddings,
+through an optimal linear compression (PCA), to a nonlinear graph embedding
+(UMAP) whose axes provably mean nothing --- and whose neighborhoods mean
+everything.}
+
+\section{The Data: Moments on a Sphere}
+
+Chapter~\ref{ch:selfsup} describes how MERT turns each $\sim$4-second moment
+of audio into a vector $e \in \R^{768}$ by mean-pooling transformer states.
+Here we take those vectors as given. The pipeline first normalizes:
+\[
+x \;=\; \frac{e}{\norm{e}} \;\in\; S^{767},
+\]
+placing every moment on the unit sphere. This makes similarity purely
+\emph{angular}:
+
+\begin{definition}[Cosine similarity and distance]\label{def:cosine}
+For nonzero $u, v \in \R^d$,
+\[
+\operatorname{sim}(u,v) = \frac{\ip{u,v}}{\norm{u}\norm{v}},
+\qquad
+d_{\cos}(u,v) = 1 - \operatorname{sim}(u,v) \;\in\; [0, 2].
+\]
+For unit vectors, $\operatorname{sim}(u,v) = \ip{u,v}$ and
+$\norm{u - v}^2 = 2\, d_{\cos}(u,v)$: cosine distance and squared Euclidean
+distance are the same thing on the sphere, up to a factor of $2$.
+\end{definition}
+
+\begin{remark}
+$d_{\cos}$ is not a metric (it fails the triangle inequality in general), but
+the angle $\arccos(\operatorname{sim})$ is. In practice every algorithm below
+only ever \emph{ranks} distances, for which the distinction is harmless.
+\end{remark}
+
+\begin{incode}
+\texttt{compute\_galaxy.py} stacks the \texttt{emb\_mix} arrays of every song
+into $X \in \R^{n \times 768}$ and normalizes rows
+(\texttt{X /= np.linalg.norm(X, axis=1, keepdims=True)}). With the current
+local library, $n = 664$; the PC batch library will push $n$ into the tens of
+thousands, which is where every guarantee in this chapter gets sharper.
+\end{incode}
+
+\section{Principal Component Analysis}
+
+The first reduction $768 \to 64$ is linear, classical, and optimal in two
+senses that turn out to be the same sense.
+
+Let $X \in \R^{n \times d}$ have centered columns (subtract the mean row
+$\bar{x}$ first), and define the sample covariance
+\[
+C = \frac{1}{n-1} X^\T X \;\in\; \R^{d \times d}.
+\]
+$C$ is symmetric positive semidefinite, so by the spectral theorem it has an
+orthonormal eigenbasis $v_1, \dots, v_d$ with eigenvalues
+$\lambda_1 \ge \lambda_2 \ge \cdots \ge \lambda_d \ge 0$.
+
+\begin{theorem}[Variance maximization]\label{thm:pca}
+The direction of maximal projected variance,
+\[
+\argmax_{\norm{u} = 1} \Var(Xu) = \argmax_{\norm{u} = 1} u^\T C u,
+\]
+is $v_1$, and the maximum equals $\lambda_1$. More generally, the
+$k$-dimensional subspace maximizing total projected variance is
+$\operatorname{span}(v_1, \dots, v_k)$, capturing variance
+$\sum_{i=1}^{k} \lambda_i$.
+\end{theorem}
+
+\begin{proof}
+Expand $u$ in the eigenbasis: $u = \sum_i \alpha_i v_i$ with
+$\sum_i \alpha_i^2 = 1$. Then
+\[
+u^\T C u = \sum_{i} \lambda_i \alpha_i^2
+\;\le\; \lambda_1 \sum_i \alpha_i^2 = \lambda_1,
+\]
+with equality iff $\alpha_i = 0$ whenever $\lambda_i < \lambda_1$. For the
+subspace statement, apply the same argument inductively on the orthogonal
+complement of the span chosen so far (the Courant--Fischer characterization).
+\end{proof}
+
+\begin{theorem}[Best low-rank approximation, Eckart--Young]\label{thm:eckart}
+Write the (thin) singular value decomposition $X = U \Sigma V^\T$ with
+singular values $\sigma_1 \ge \cdots \ge \sigma_d$. Among all matrices $M$ of
+rank at most $k$,
+\[
+\norm{X - M}_F^2 \;\ge\; \sum_{i > k} \sigma_i^2,
+\]
+with equality for $M = U \Sigma_k V^\T$ ($\Sigma_k$ keeps the top $k$
+singular values). Equivalently: projecting the rows of $X$ onto
+$\operatorname{span}(v_1,\dots,v_k)$ is the rank-$k$ linear map minimizing
+total squared reconstruction error.
+\end{theorem}
+
+\begin{remark}
+Theorems~\ref{thm:pca} and \ref{thm:eckart} are the same fact seen from two
+sides, connected by $C = \frac{1}{n-1} V \Sigma^2 V^\T$: the covariance
+eigenvectors are the right singular vectors, and
+$\lambda_i = \sigma_i^2/(n-1)$. ``Keep the most variance'' and ``lose the
+least reconstruction'' pick the same subspace.
+\end{remark}
+
+\begin{incode}
+\texttt{PCA(n\_components=64).fit\_transform(X)} in
+\texttt{compute\_galaxy.py}. Two engineering motives, neither about
+visualization per se: (i) UMAP's neighbor search runs $\sim$12$\times$
+faster in $64$ dimensions than in $768$; (ii) the trailing dimensions of
+mean-pooled transformer embeddings are mostly noise, and
+Theorem~\ref{thm:eckart} says truncation is the \emph{least} destructive way
+to drop them. Note that with $n = 664 < 768$ the data matrix cannot have rank
+above $663$ anyway; PCA here is denoising, not compression.
+\end{incode}
+
+\section{UMAP I: The Graph}
+
+UMAP\footnote{McInnes, Healy, Melville, \emph{UMAP: Uniform Manifold
+Approximation and Projection for Dimension Reduction} (2018). These notes
+present the algorithm as implemented, with the category-theoretic framing
+omitted.} operates in two acts. Act one converts the point cloud
+$\{x_1, \dots, x_n\} \subset \R^{64}$ into a weighted graph encoding local
+structure; act two lays that graph out in the plane. The high-dimensional
+coordinates never appear again after act one --- everything the map knows is
+in the graph.
+
+\begin{definition}[$k$-NN graph]\label{def:knn}
+Fix $k \in \N$ (here $k = 15$) and a metric $d$ (here $d_{\cos}$). For each
+$i$ let $N(i)$ be the set of its $k$ nearest neighbors. The directed graph
+has an edge $i \to j$ for each $j \in N(i)$.
+\end{definition}
+
+Exact $k$-NN costs $\Theta(n^2 d)$; the implementation uses NN-descent, a
+randomized refinement scheme, for near-linear approximate search.
+
+The heart of UMAP is what it does with the raw distances next. Two constants
+are computed per point:
+
+\begin{definition}[Local calibration]\label{def:rhosigma}
+For each point $i$, set $\rho_i = \min_{j \in N(i)} d(x_i, x_j)$ (distance to
+the nearest neighbor), and let $\sigma_i > 0$ solve
+\begin{equation}\label{eq:sigma}
+\sum_{j \in N(i)} \exp\!\left(- \frac{\max(0,\, d(x_i, x_j) - \rho_i)}
+{\sigma_i}\right) \;=\; \log_2 k .
+\end{equation}
+The directed membership strength of edge $i \to j$ is then
+\[
+w_{i \to j} = \exp\!\left(- \frac{\max(0,\, d(x_i, x_j) - \rho_i)}
+{\sigma_i}\right).
+\]
+\end{definition}
+
+\begin{lemma}[The calibration is well-posed]\label{lem:sigma}
+Suppose not all neighbors of $i$ are at distance exactly $\rho_i$ (generic
+position). Then Equation~\eqref{eq:sigma} has a unique solution
+$\sigma_i \in (0, \infty)$.
+\end{lemma}
+
+\begin{proof}
+Let $g(\sigma)$ denote the left side, a finite sum of terms
+$\exp(-c_j / \sigma)$ with constants $c_j = \max(0, d_{ij} - \rho_i) \ge 0$,
+at least one $c_j = 0$ (the nearest neighbor) and, by assumption, at least
+one $c_j > 0$. Each term is continuous and nondecreasing in $\sigma$; terms
+with $c_j > 0$ are strictly increasing. Hence $g$ is continuous and strictly
+increasing, with
+\[
+\lim_{\sigma \to 0^+} g(\sigma) = \#\{j : c_j = 0\} \ge 1,
+\qquad
+\lim_{\sigma \to \infty} g(\sigma) = k .
+\]
+Since $1 \le \log_2 k < k$ for $k \ge 2$ (here $\log_2 15 \approx 3.91$),
+the intermediate value theorem gives existence whenever
+$\#\{j : c_j = 0\} \le \log_2 k$, and strict monotonicity gives uniqueness.
+(The implementation solves \eqref{eq:sigma} by binary search.)
+\end{proof}
+
+\begin{remark}[Why calibrate?]\label{rem:uniform}
+Equation~\eqref{eq:sigma} forces every point to distribute the same total
+membership mass ($\log_2 k$) over its neighborhood. In a dense region,
+$\sigma_i$ comes out small (distances are shrunk aggressively); in a sparse
+region, large. This is the ``Uniform'' in UMAP: \emph{assume} the data is
+uniformly distributed on some manifold, and absorb observed density
+variation into a point-dependent rescaling of distance. The $\rho_i$ shift
+additionally guarantees every point is connected with weight $1$ to its
+nearest neighbor, so no point is orphaned. The cost of this assumption:
+UMAP largely erases density information --- a tight cluster and a loose
+cluster of the same membership look alike on the map. Cluster \emph{size} on
+the galaxy is not evidence of anything.
+\end{remark}
+
+Directed weights disagree ($w_{i \to j} \neq w_{j \to i}$), so they are
+merged:
+
+\begin{definition}[Fuzzy union]\label{def:fuzzyunion}
+The symmetric weight of the pair $\{i, j\}$ is
+\[
+\mu_{ij} \;=\; w_{i \to j} + w_{j \to i} - w_{i \to j}\, w_{j \to i}.
+\]
+\end{definition}
+
+\begin{remark}
+If the two directed weights are read as independent probabilities that ``$i$
+accepts $j$ as a neighbor'' and vice versa, $\mu_{ij}$ is exactly
+$\Pr(\text{at least one accepts})$ --- the probabilistic OR
+($t$-conorm). One-sided friendships survive; that keeps bridges between
+regions alive.
+\end{remark}
+
+\section{UMAP II: The Layout}
+
+Act two seeks low-dimensional points $y_1, \dots, y_n \in \R^2$ whose
+\emph{own} fuzzy graph resembles $\mu$. The low-dimensional membership is
+defined by a smooth rational kernel:
+
+\begin{definition}[Low-dimensional kernel]\label{def:nukernel}
+Fix $a, b > 0$. For $y_i, y_j \in \R^2$,
+\[
+\nu_{ij} \;=\; \Big(1 + a\,\norm{y_i - y_j}^{2b}\Big)^{-1}.
+\]
+The constants $a, b$ are fit by least squares so that $\nu$ approximates
+\[
+\Psi(t) =
+\begin{cases}
+1 & t \le \texttt{min\_dist}, \\
+\exp\!\big(-(t - \texttt{min\_dist})\big) & t > \texttt{min\_dist},
+\end{cases}
+\]
+i.e.\ ``full membership within \texttt{min\_dist}, exponential decay
+beyond.''
+\end{definition}
+
+\texttt{min\_dist} is therefore a pure \emph{rendering} parameter: it sets
+how tightly the layout may pack points that the graph considers identical,
+trading cluster crispness against within-cluster detail.
+
+\begin{definition}[Objective]\label{def:umapce}
+The layout minimizes the fuzzy cross-entropy
+\[
+\mathcal{C}(y) \;=\; \sum_{i < j}
+\underbrace{\mu_{ij} \log \frac{\mu_{ij}}{\nu_{ij}}}_{\text{attraction}}
+\;+\;
+\underbrace{(1 - \mu_{ij}) \log \frac{1 - \mu_{ij}}{1 - \nu_{ij}}}_{\text{repulsion}} .
+\]
+\end{definition}
+
+The names are earned by the gradients: the first term is minimized by making
+$\nu_{ij}$ large (pull connected points together), the second by making
+$\nu_{ij}$ small (push unconnected points apart). The final map is the
+equilibrium of $n(n-1)/2$ simultaneous tugs-of-war.
+
+\begin{proposition}[Attractive gradient]\label{prop:grad}
+For the attractive term of a single pair, with
+$r = \norm{y_i - y_j}$,
+\[
+\frac{\partial}{\partial y_i}
+\Big[ -\mu_{ij} \log \nu_{ij} \Big]
+= \mu_{ij}\,
+\frac{2ab\, r^{2(b-1)}}{1 + a r^{2b}}\,
+\big(y_i - y_j\big),
+\]
+a spring whose stiffness decays as points approach --- unlike a Hookean
+spring, distant neighbors are pulled hard while satisfied ones are left
+alone.
+\end{proposition}
+
+\begin{proof}
+$-\log \nu_{ij} = \log(1 + a r^{2b})$; apply the chain rule with
+$\partial r^2 / \partial y_i = 2(y_i - y_j)$ and simplify.
+\end{proof}
+
+Minimization proceeds by stochastic gradient descent over \emph{edges}: each
+epoch samples edges proportionally to $\mu_{ij}$, applies
+Proposition~\ref{prop:grad} to the endpoints, and for each such update also
+samples a handful of random non-neighbors ($\approx 5$) to apply the
+repulsive gradient to --- \emph{negative sampling}, the standard trick for
+avoiding the $\Theta(n^2)$ full repulsion sum. The learning rate anneals
+linearly to zero over \texttt{n\_epochs} (the local run used $500$).
+
+Initialization is not random: the points start at the \emph{spectral
+embedding} of the graph --- coordinates from the bottom nontrivial
+eigenvectors of the symmetric normalized graph Laplacian
+$L = I - D^{-1/2} M D^{-1/2}$ (where $M = (\mu_{ij})$ and $D$ is its degree
+matrix). This is exactly the Laplacian-eigenmaps solution, a convex
+relaxation of the same ``neighbors stay close'' demand, and it starts SGD in
+a basin that already respects the coarse cluster structure.
+
+\section{What the Map Does and Does Not Mean}
+
+\begin{proposition}[Isometry invariance]\label{prop:invariance}
+Let $T : \R^2 \to \R^2$ be any Euclidean isometry (rotation, reflection,
+translation, or a composition). Then
+$\mathcal{C}(T y_1, \dots, T y_n) = \mathcal{C}(y_1, \dots, y_n)$.
+\end{proposition}
+
+\begin{proof}
+$\mathcal{C}$ depends on the layout only through the pairwise distances
+$\norm{y_i - y_j}$ (via $\nu_{ij}$), and isometries preserve pairwise
+distances by definition.
+\end{proof}
+
+\begin{corollary}[The axes are meaningless]\label{cor:axes}
+The set of minimizers of $\mathcal{C}$ is closed under all Euclidean
+isometries. Which representative the algorithm returns is decided by the
+spectral initialization and the randomness of SGD --- not by the data. In
+particular, no direction on the galaxy map (up, down, left, right) admits
+any interpretation, and separate runs on the same library may return maps
+differing by rotation, reflection, or more.
+\end{corollary}
+
+What survives, and why one may trust it: $\mu_{ij}$ is built \emph{only}
+from each point's $k$ nearest neighbors, and the objective's attraction acts
+only on those pairs. Local neighborhoods are the signal; everything else ---
+inter-cluster distances, cluster areas (Remark~\ref{rem:uniform}), global
+shape --- is a side effect of repulsion and should be read with suspicion.
+
+\begin{incode}
+\texttt{compute\_galaxy.py} runs
+\texttt{umap.UMAP(n\_components=2, n\_neighbors=15, min\_dist=0.05,
+metric="cosine")} for positions. Post-processing: positions are centered and
+divided by the $99.5$th percentile of coordinate magnitude --- a robust
+rescale to roughly $[-1,1]^2$ that one outlier moment cannot hijack.
+The client (\texttt{app.js}, \texttt{Galaxy}) and the drift view
+(\texttt{vibescenes.js}) treat the coordinates as opaque: everything they
+draw --- hover neighborhoods, the song path, the flight camera --- uses only
+relative position, as Corollary~\ref{cor:axes} demands.
+\end{incode}
+
+\section{Color as a Second Opinion}
+
+The star colors are not styling; they are a second, independent instance of
+the same mathematics. The pipeline runs UMAP \emph{again} on the same
+$64$-dimensional data with \texttt{n\_components=3} and a looser
+\texttt{min\_dist} of $0.3$, yielding $z_i \in \R^3$, then maps robustly to
+RGB:
+\[
+\text{rgb}_i \;=\; 60 + 195 \cdot
+\operatorname{clip}\!\left(
+\frac{z_i - p_2}{p_{98} - p_2},\; 0,\; 1\right),
+\]
+where $p_2, p_{98}$ are per-channel percentiles (the affine map lands in
+$[60, 255]^3$ so no star is too dark against the background).
+
+Because the 3-D run shares the input graph-building mathematics but not the
+2-D run's optimization trajectory, \emph{hue similarity is a
+quasi-independent witness of timbral similarity}. When two nearby stars also
+share a color, two different embeddings agreed; when a star's color clashes
+with its neighborhood, the 2-D layout likely forced a compromise
+(Corollary~\ref{cor:axes} again: the plane is small).
+
+\section*{Exercises}
+
+\begin{exercise}
+Prove the identity $\norm{u - v}^2 = 2\,d_{\cos}(u,v)$ for unit vectors, and
+exhibit three unit vectors in $\R^2$ violating the triangle inequality for
+$d_{\cos}$.
+\end{exercise}
+
+\begin{exercise}
+Prove the subspace half of Theorem~\ref{thm:pca}: among all $k$-dimensional
+subspaces $S$, total projected variance is maximized by the span of the top
+$k$ eigenvectors. (Induct using the variational characterization on the
+orthogonal complement.)
+\end{exercise}
+
+\begin{exercise}
+In Lemma~\ref{lem:sigma}, suppose point $i$ has $t$ neighbors tied exactly at
+distance $\rho_i$ with $t > \log_2 k$. What goes wrong, and what does the
+condition mean geometrically? (The implementation clamps $\sigma_i$ to a
+minimum value in this case.)
+\end{exercise}
+
+\begin{exercise}
+Verify Proposition~\ref{prop:grad}. Then derive the repulsive gradient
+$\partial\big[-(1-\mu_{ij})\log(1 - \nu_{ij})\big] / \partial y_i$ and show
+it diverges as $r \to 0$ when $b < 1$. The implementation adds a small
+$\varepsilon$ to $r^2$; explain what failure this prevents during SGD.
+\end{exercise}
+
+\begin{exercise}
+Prove that $\mu_{ij} = w_{i\to j} + w_{j \to i} - w_{i \to j} w_{j \to i}$
+satisfies $\max(w_{i \to j}, w_{j \to i}) \le \mu_{ij} \le
+\min(1,\, w_{i \to j} + w_{j \to i})$, and characterize when each bound is
+attained.
+\end{exercise}
+
+\begin{exercise}[computational]
+Run \texttt{compute\_galaxy.py} twice with different random seeds and overlay
+the two maps. Find the best-fitting rotation+reflection between them by
+solving the orthogonal Procrustes problem
+$\min_{Q^\T Q = I} \norm{Y_1 Q - Y_2}_F$ (solution: $Q = UV^\T$ from the SVD
+of $Y_1^\T Y_2$). How much residual disagreement survives after aligning?
+Which regions of the map are stable, and are they the dense ones?
+\end{exercise}
+
+\begin{exercise}[computational]
+Set \texttt{n\_neighbors=5} and rebuild the galaxy. Describe what happens to
+(i) song threads, (ii) the number of visual clusters, (iii) bridges between
+genres. Explain each observation via Remark~\ref{rem:uniform} and the role of
+$k$ in Definition~\ref{def:knn}.
+\end{exercise}

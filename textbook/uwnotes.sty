@@ -1,0 +1,84 @@
+% uwnotes.sty — Waterloo-course-notes flavour for the Music Microscope book.
+% Plain amsthm environments numbered within chapters, a restrained colour
+% palette, and an "In the code" box tying results to the actual codebase.
+\ProvidesPackage{uwnotes}[2026/07/10 Music Microscope course notes style]
+
+\RequirePackage[margin=1.05in]{geometry}
+\RequirePackage{amsmath,amssymb,amsthm,mathtools}
+\RequirePackage{xcolor}
+\RequirePackage{graphicx}
+\RequirePackage{enumitem}
+\RequirePackage{booktabs}
+\RequirePackage{fancyhdr}
+\RequirePackage[most]{tcolorbox}
+\RequirePackage[colorlinks=true]{hyperref}
+
+% ---- palette ---------------------------------------------------------------
+\definecolor{uwblue}{RGB}{0,51,102}
+\definecolor{uwgold}{RGB}{132,90,0}
+\definecolor{codebg}{RGB}{245,246,248}
+\definecolor{codeframe}{RGB}{120,130,150}
+\hypersetup{linkcolor=uwblue, citecolor=uwblue, urlcolor=uwgold}
+
+% ---- headers ---------------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\itshape\nouppercase{\leftmark}}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\setlength{\headheight}{14pt}
+
+% ---- theorem environments (numbered within chapter, shared counter) --------
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[chapter]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{algorithm}[theorem]{Algorithm}
+\newtheorem{exercise}{Exercise}[chapter]
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% ---- "In the code" box ------------------------------------------------------
+% Ties a mathematical object to the file / function / parameter where it runs.
+\newtcolorbox{incode}{
+  enhanced, breakable,
+  colback=codebg, colframe=codeframe,
+  boxrule=0.4pt, arc=1.5pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt,
+  fonttitle=\bfseries\small, title={In the code},
+  coltitle=white, colbacktitle=codeframe,
+  attach boxed title to top left={yshift=-2mm, xshift=3mm},
+  boxed title style={boxrule=0pt, arc=1pt, left=4pt, right=4pt},
+  before skip=10pt, after skip=10pt,
+}
+
+% ---- notation macros --------------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\E}{\mathbb{E}}
+\DeclarePairedDelimiter{\abs}{\lvert}{\rvert}
+\DeclarePairedDelimiter{\norm}{\lVert}{\rVert}
+\DeclarePairedDelimiter{\ip}{\langle}{\rangle}
+\DeclarePairedDelimiter{\floor}{\lfloor}{\rfloor}
+\DeclarePairedDelimiter{\ceil}{\lceil}{\rceil}
+\newcommand{\T}{\mathsf{T}}                    % transpose
+\newcommand{\dd}{\,\mathrm{d}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator{\tr}{tr}
+\DeclareMathOperator{\rank}{rank}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\Var}{Var}
+\DeclareMathOperator{\softmax}{softmax}
+
+% chapter-opening quote-ish summary
+\newcommand{\chapterlede}[1]{%
+  \begin{quote}\itshape #1\end{quote}\medskip}

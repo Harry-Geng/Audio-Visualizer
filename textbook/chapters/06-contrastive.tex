@@ -1,0 +1,37 @@
+\chapter{Contrastive Embeddings: CLAP and the Vibe Axes \emph{(outline)}}\label{ch:contrastive}
+\chapterlede{One model, two encoders, one shared space: CLAP aligns audio
+with language, which lets us name directions in sound-space using English
+sentences. The vibe visualizations are driven by dot products against those
+directions.}
+
+\begin{incode}
+Status: outline. To be written against \texttt{backfill\_clap.py} (audio
+tower), \texttt{compute\_vibe.py} (text axes: bright/warm/dense/tense/%
+euphoric/vast), and \texttt{microscope.py}'s \texttt{/api/textsearch}.
+\end{incode}
+
+Planned contents:
+\begin{itemize}
+  \item \textbf{The InfoNCE objective.} Batch of $(a_i, t_i)$ pairs;
+  \[
+  \mathcal{L} = -\frac{1}{B}\sum_i \log
+  \frac{\exp(\ip{a_i, t_i}/\tau)}{\sum_j \exp(\ip{a_i, t_j}/\tau)} ;
+  \]
+  symmetric audio$\to$text and text$\to$audio terms; the learned temperature
+  $\tau$; InfoNCE as a lower bound on mutual information (statement, proof
+  sketch).
+  \item \textbf{Geometry of the shared space.} Why both towers L2-normalize;
+  alignment vs.\ uniformity decomposition of the loss; the modality gap
+  (audio and text occupy offset cones) and why \emph{differences} of text
+  embeddings partially cancel it.
+  \item \textbf{Zero-shot classification = nearest text.} Text search over
+  moments as a single matrix--vector product (\texttt{emb @ text\_vec}).
+  \item \textbf{Semantic axes.} The vibe construction: multi-prompt pole
+  averaging (variance reduction), score $= \ip{e, v_+} - \ip{e, v_-}$;
+  percentile normalization as a monotone calibration; why axes are
+  \emph{named} but not \emph{orthogonal} --- correlated axes (bright/euphoric)
+  and what that implies for palette mappings.
+  \item \textbf{Failure modes.} Prompt sensitivity; the broken-checkpoint
+  incident (\texttt{laion/larger\_clap\_music} collapsed embeddings) as a
+  case study in validating learned components empirically.
+\end{itemize}

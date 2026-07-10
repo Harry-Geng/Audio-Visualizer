@@ -1,0 +1,29 @@
+\chapter{Attention and Transformers \emph{(outline)}}\label{ch:attention}
+\chapterlede{The workhorse architecture behind every neural network in this
+project: MERT, CLAP's text tower, Demucs' bottleneck, and BS-RoFormer are all
+transformers. This chapter builds the mechanism once so later chapters can
+use it freely.}
+
+\begin{incode}
+Status: outline. The definitions here are prerequisites for
+Chapters~\ref{ch:selfsup}--\ref{ch:contrastive}.
+\end{incode}
+
+Planned contents:
+\begin{itemize}
+  \item \textbf{Scaled dot-product attention.}
+  $\operatorname{Attn}(Q,K,V) = \softmax(QK^\T/\sqrt{d_k})\,V$; attention as
+  a data-dependent convex combination; the $\sqrt{d_k}$ scaling justified via
+  the variance of dot products of random vectors (with proof).
+  \item \textbf{Multi-head attention} as subspace projections; parameter
+  counting; why heads specialize.
+  \item \textbf{Positional information.} Sinusoidal encodings; relative
+  position; \emph{rotary embeddings} (RoPE) --- rotation matrices acting on
+  pairs of coordinates, and the theorem that RoPE makes attention scores a
+  function of relative offset only (this is the ``Ro'' in BS-RoFormer).
+  \item \textbf{The full block.} Residual streams, LayerNorm (with the
+  gradient argument for pre-norm), feed-forward expansion; $O(T^2)$ cost in
+  sequence length and what that means for $75$\,fps audio frames.
+  \item \textbf{Softmax and temperature.} Properties used throughout:
+  invariance to additive shifts, the Jacobian, low/high temperature limits.
+\end{itemize}

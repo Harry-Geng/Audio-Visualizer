@@ -1,0 +1,32 @@
+\chapter{Self-Supervised Audio Representations: MERT \emph{(outline)}}\label{ch:selfsup}
+\chapterlede{How a network learns what music sounds like with no labels at
+all: mask part of the signal, force the model to predict it, and the
+representations needed to succeed turn out to be the ones we wanted.}
+
+\begin{incode}
+Status: outline. To be written against \texttt{embeddings.py}
+(\texttt{m-a-p/MERT-v1-95M}, frame embeddings at $\sim$75 fps, 13 hidden
+layers averaged, mean-pooled per moment).
+\end{incode}
+
+Planned contents:
+\begin{itemize}
+  \item \textbf{The masked-prediction template.} BERT-style objectives for
+  continuous signals; why predicting raw waveforms fails and targets must be
+  discretized or abstracted.
+  \item \textbf{Discrete targets via vector quantization.} Codebooks,
+  the RVQ (residual VQ) construction used by neural codecs; commitment
+  losses; MERT's acoustic teacher.
+  \item \textbf{MERT's musical teacher.} The constant-Q transform (CQT):
+  logarithmically-spaced filters aligned with equal temperament
+  (Appendix~\ref{ch:temperament}); why adding a CQT reconstruction loss
+  injects pitch awareness that codec tokens miss.
+  \item \textbf{The convolutional front end.} Strided convolutions as
+  learned filterbanks; receptive field and frame-rate arithmetic.
+  \item \textbf{Which layer knows what.} Probing studies; why the pipeline
+  averages all 13 hidden states rather than taking the last; mean-pooling as
+  a bag-of-frames assumption and what temporal information it forfeits.
+  \item \textbf{From frames to moments.} The pooling map
+  $e = \frac{1}{T}\sum_t h_t$ and its effect on the geometry of
+  Chapter~\ref{ch:timbre}.
+\end{itemize}

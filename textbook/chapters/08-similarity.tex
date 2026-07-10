@@ -1,0 +1,28 @@
+\chapter{Similarity Search and the Moment Index \emph{(outline)}}\label{ch:similarity}
+\chapterlede{``Find me moments that sound like this one'' --- across every
+song in the library, in milliseconds, along a chosen facet (whole mix, just
+the drums, just the vocals).}
+
+\begin{incode}
+Status: outline. To be written against \texttt{moment\_index.py},
+\texttt{moments.py}, \texttt{descriptors.py}, \texttt{interactions.py}, and
+the \texttt{/api/similar} endpoint.
+\end{incode}
+
+Planned contents:
+\begin{itemize}
+  \item \textbf{Exact top-$k$ retrieval.} Cosine scores as one matrix--vector
+  product; complexity and memory layout; when brute force beats an index
+  (spoiler: at this library's scale, always).
+  \item \textbf{Faceted similarity.} Per-stem embedding blocks
+  (\texttt{emb\_drums}, \texttt{emb\_bass}, \ldots) as projections of the
+  product space; facet weighting as a diagonal metric.
+  \item \textbf{Interpretable descriptors.} The 18-dimensional
+  descriptor vector (RMS, onset density, spectral centroid, active
+  fraction per stem); z-scoring; mixing learned and hand-crafted metrics.
+  \item \textbf{Diversity constraints.} The per-song result cap as a greedy
+  approximation to maximal marginal relevance.
+  \item \textbf{Approximate methods} (for the future large library):
+  inverted-file indices, HNSW graphs, product quantization --- what each
+  trades away.
+\end{itemize}

@@ -51,3 +51,6 @@ _run_overnight.ps1
 # Space repo, not to this code repo (contains audio)
 demo_library/
 demo_songs/
+
+# LaTeX build artifacts
+textbook/build/

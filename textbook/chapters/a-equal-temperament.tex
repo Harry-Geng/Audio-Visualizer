@@ -1,0 +1,77 @@
+\chapter{Equal Temperament and Chroma}\label{ch:temperament}
+\chapterlede{The small amount of music theory the codebase depends on,
+stated as mathematics.}
+
+\section{Pitch is Logarithmic}
+
+The ear judges two pitch \emph{intervals} equal when the frequency
+\emph{ratios} are equal: the step from $110$ to $220$ Hz sounds like the
+step from $220$ to $440$ Hz. Perceived pitch is therefore a logarithm of
+frequency, and Western tuning discretizes that logarithm.
+
+\begin{definition}[12-tone equal temperament]\label{def:tet}
+Fix the reference $A4 = 440$ Hz. The \emph{semitone} is the ratio
+$2^{1/12}$, and the pitch number (MIDI number) of frequency $f > 0$ is
+\[
+m(f) \;=\; 69 + 12 \log_2\!\frac{f}{440},
+\]
+so that $m(440) = 69$ and each octave (doubling) spans exactly $12$ units.
+The nearest note is $\lfloor m(f) \rceil$, and the error
+$m(f) - \lfloor m(f) \rceil$, in units of $1/100$ of a semitone, is measured
+in \emph{cents}.
+\end{definition}
+
+\begin{remark}
+$2^{1/12}$ is irrational, so no interval except the octave is acoustically
+pure: the equal-tempered fifth is $2^{7/12} \approx 1.4983$, not $3/2$. Equal
+temperament trades purity for symmetry --- every key sounds the same --- and
+it is exactly that symmetry the definitions below exploit.
+\end{remark}
+
+\begin{definition}[Pitch class and chroma]\label{def:chroma}
+The \emph{pitch class} of frequency $f$ is
+$c(f) = \lfloor m(f) \rceil \bmod 12 \in \{0, \dots, 11\}$ ($0 = $ C,
+$1 = $ C$\sharp$, \dots, $11 = $ B). A \emph{chroma vector} of a spectrum
+$\abs{X[k]}$ is the 12-vector that folds all octaves onto pitch classes:
+\[
+\text{ch}[c] \;=\; \sum_{k \,:\, c(f_k) = c} \abs{X[k]},
+\qquad c = 0, \dots, 11,
+\]
+summing over bins $k$ with frequencies $f_k$ in a chosen band.
+\end{definition}
+
+Chroma deliberately forgets octave and timbre, keeping only \emph{harmony}
+--- which notes are sounding. Two voicings of the same chord, octaves apart
+on different instruments, give nearly the same chroma vector.
+
+\begin{incode}
+Definition~\ref{def:tet} appears verbatim wherever the code names a note:
+\texttt{scene.js} computes \texttt{midi = Math.round(69 + 12 *
+Math.log2(hz / 440))} for the vocal and bass note labels, with
+\texttt{NOTE\_NAMES[((midi \% 12) + 12) \% 12]} implementing $c(f)$ (the
+double-mod guards JavaScript's signed \texttt{\%}). Definition~\ref{def:chroma}
+is \texttt{computeChroma()}, folding analyser bins between $55$ and
+$2000$ Hz; the twelve values drive the mandala's twelve petals, making that
+visualization literally a plot of the chroma vector in polar coordinates.
+The per-bin nearest-note rounding is exact for high bins but aliases for low
+ones (Chapter~\ref{ch:sound}, Exercise 1.6) --- one reason chroma starts at
+$55$ Hz rather than lower.
+\end{incode}
+
+\section*{Exercises}
+
+\begin{exercise}
+Show that the map $f \mapsto c(f)$ satisfies $c(2f) = c(f)$, and that scaling
+$f$ by the equal-tempered fifth $2^{7/12}$ advances the pitch class by $7
+\pmod{12}$. Since $\gcd(7, 12) = 1$, conclude that stacking fifths visits all
+$12$ pitch classes --- the circle of fifths as a statement about the group
+$\Z/12\Z$.
+\end{exercise}
+
+\begin{exercise}
+The bass string $E1$ has fundamental $41.2$ Hz. Its second and third
+harmonics are $82.4$ and $123.6$ Hz. To which pitch classes do the first
+five harmonics round, and how many cents does each miss by? (This is why
+chroma computed on a bass-heavy band is polluted by harmonics --- and why
+\texttt{computeChroma} prefers harmonic stems.)
+\end{exercise}

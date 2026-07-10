@@ -1,0 +1,35 @@
+\chapter{Source Separation \emph{(outline)}}\label{ch:separation}
+\chapterlede{The signature capability of the whole project: given a stereo
+mixture, recover drums, bass, vocals, and the rest. Mathematically: invert a
+many-to-one map, using learned priors about what instruments sound like.}
+
+\begin{incode}
+Status: outline. To be written against \texttt{ingest.py}: Demucs
+(\texttt{htdemucs}, \texttt{htdemucs\_6s}), BS-RoFormer vocals, the MDX23C
+DrumSep cascade, and the measured $\sim$17$\times$ vocal-bleed reduction from
+the RoFormer-first cascade.
+\end{incode}
+
+Planned contents:
+\begin{itemize}
+  \item \textbf{The problem is ill-posed.} Mixture $m = \sum_s x_s$; the
+  solution set is an affine subspace; separation = choosing by prior.
+  \item \textbf{Mask-based separation.} Time-frequency masks
+  $\hat{X}_s = M_s \odot X_m$; the ideal ratio mask; phase reuse and its
+  artifacts; why overlap-add consistency (Exercise 1.4) matters.
+  \item \textbf{Waveform models and hybrids.} Demucs' U-Net encoder/decoder
+  with a transformer bottleneck operating in both time and spectrogram
+  domains; skip connections as multiresolution identity paths.
+  \item \textbf{Band-split RoFormer.} Partitioning the spectrogram into
+  perceptually-sized bands, per-band tokens, RoPE attention across time and
+  band axes (Chapter~\ref{ch:attention}); why this architecture currently
+  wins vocals benchmarks.
+  \item \textbf{Evaluation.} SDR/SIR/SAR decomposition, in decibels; what a
+  $+1$ dB SDR gain sounds like; why ``piano'' is hard (spectral overlap with
+  \emph{everything} --- the boundary-flicker documented in the project
+  memory).
+  \item \textbf{Cascades.} Removing a well-modeled source first
+  (vocals) shrinks the residual problem for the rest; conditions under which
+  cascading helps vs.\ compounds errors, with the project's drum-kit split
+  as the worked example.
+\end{itemize}

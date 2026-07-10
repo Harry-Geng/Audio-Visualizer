@@ -1,0 +1,102 @@
+\documentclass[11pt,oneside]{book}
+\usepackage{uwnotes}
+
+\title{The Mathematics of the Music Microscope}
+\author{Harry Geng}
+\date{}
+
+\begin{document}
+
+% ================= title page =================
+\begin{titlepage}
+\centering
+{\Huge\bfseries The Mathematics of the\\[4pt] Music Microscope\par}
+\vspace{1.2cm}
+{\Large Course Notes for the Audio-Visualizer Project\par}
+\vspace{2.2cm}
+{\large Harry Geng\par}
+\vfill
+{\small Living document --- grows with the codebase.\\
+Chapters marked \emph{(outline)} are planned but not yet written.\par}
+\vspace{0.8cm}
+{\small \today\par}
+\end{titlepage}
+
+\frontmatter
+\tableofcontents
+
+% ================= preface =================
+\chapter{Preface}
+These notes document, with proofs where they are illuminating, the mathematics
+running inside the Audio-Visualizer project: a system that ingests songs,
+separates them into stems with neural networks, extracts musical structure,
+embeds every few seconds of audio into learned vector spaces, and renders the
+result as interactive visualizations.
+
+The material spans four traditions that rarely share a book: classical signal
+processing (Part~\ref{part:signals}), modern deep learning
+(Part~\ref{part:learning}), the geometry of high-dimensional data
+(Part~\ref{part:geometry}), and computer graphics
+(Part~\ref{part:rendering}). The unifying thread is that \emph{every object
+defined here actually runs}: each chapter ends where the repository begins,
+and the ``In the code'' boxes point at the specific file, function, and
+parameter values where a definition earns its keep. When a theorem's
+hypothesis is violated in practice (they often are), the notes say so and
+describe what breaks.
+
+Exercises range from short proofs to experiments you can run against your own
+music library. None are busywork; several reproduce bugs that were actually
+encountered while building the system.
+
+\section*{How to read this}
+Chapter~\ref{ch:sound} and Chapter~\ref{ch:timbre} are complete and set the
+standard for the rest. The remaining chapters exist as detailed outlines and
+will be filled in as the corresponding subsystems stabilize. Prerequisites are
+first-year linear algebra and calculus; everything else is developed as
+needed.
+
+\section*{Notation}
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+$x[n]$ & a discrete-time signal (square brackets: integer index) \\
+$f_s$ & sampling rate in Hz \\
+$X[k]$ & the DFT of $x[n]$; $k$ indexes frequency bins \\
+$\norm{x}$ & Euclidean norm; $\norm{x}_F$ the Frobenius norm \\
+$\ip{x,y}$ & inner product $x^\T y$ \\
+$S^{d-1}$ & the unit sphere $\{x \in \R^d : \norm{x} = 1\}$ \\
+$A^\T$ & matrix transpose \\
+$\mathbf{1}[\cdot]$ & indicator function \\
+$\log$ & natural logarithm unless a base is written \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\mainmatter
+
+% ================= PART I =================
+\part{Signals}\label{part:signals}
+\input{chapters/01-sound-to-vectors}
+\input{chapters/02-filters-beats}
+
+% ================= PART II =================
+\part{Learning}\label{part:learning}
+\input{chapters/03-attention}
+\input{chapters/04-selfsupervised}
+\input{chapters/05-separation}
+\input{chapters/06-contrastive}
+
+% ================= PART III =================
+\part{Geometry of Timbre}\label{part:geometry}
+\input{chapters/07-timbre-maps}
+\input{chapters/08-similarity}
+
+% ================= PART IV =================
+\part{Rendering}\label{part:rendering}
+\input{chapters/09-shader-math}
+
+% ================= appendix =================
+\appendix
+\input{chapters/a-equal-temperament}
+
+\end{document}
