@@ -1602,7 +1602,23 @@ const Radio = {
         const seen = new Set([S.songId, ...this.history]);
         const fresh = (d.results || []).filter(x => !seen.has(x.song_id));
         // prefer joining somewhere that leaves plenty of song left to play
-        cand = fresh.find(x => (x.start_t || 0) <= 180) || fresh[0] || null;
+        const pool = fresh.filter(x => (x.start_t || 0) <= 180);
+        const curTempo = (S.meta.features && S.meta.features.tempo) || 0;
+        const scored = (pool.length ? pool : fresh).map(x => {
+          let w = Math.max(0.001, x.score || 0.001);
+          if (curTempo && x.tempo) {             // beat-matchable → strong preference
+            let q = curTempo / x.tempo;
+            while (q > 1.5) q /= 2;              // half/double-time equivalence
+            while (q < 0.67) q *= 2;
+            if (q >= 0.94 && q <= 1.06) w *= 1.6;
+          }
+          return { x, w };
+        }).sort((a, b) => b.w - a.w).slice(0, 5);
+        // weighted random among the top 5 — variety instead of the same
+        // successor every time this outro plays
+        let roll = Math.random() * scored.reduce((s, t) => s + t.w, 0);
+        for (const t of scored) { roll -= t.w; if (roll <= 0) { cand = t.x; break; } }
+        if (!cand && scored.length) cand = scored[0].x;
       }
     } catch {}
     if (!cand) {                                       // index building / unknown song

@@ -610,6 +610,26 @@ def _ensure_mindex():
     return _MINDEX
 
 
+_TEMPO_CACHE = {}
+
+
+def _song_tempo(song_id):
+    """Tempo (bpm) from the song's features json, cached — the radio uses it to
+    prefer beat-matchable next tracks without loading whole songs."""
+    if song_id in _TEMPO_CACHE:
+        return _TEMPO_CACHE[song_id]
+    t = 0.0
+    p = _features_path(song_id)
+    if p:
+        try:
+            with open(p, encoding="utf-8") as f:
+                t = float(json.load(f).get("macro", {}).get("tempo") or 0)
+        except Exception:
+            pass
+    _TEMPO_CACHE[song_id] = t
+    return t
+
+
 def _seed_moment(song_id, t):
     """Resolve a playback time to that song's moment index (containing, else nearest)."""
     rows = _MINDEX_SONGROWS.get(song_id)
@@ -958,6 +978,7 @@ class Handler(BaseHTTPRequestHandler):
                              if m2 == mi), (0.0, 0.0))
                 for r in res:
                     r["title"] = r["song_id"]
+                    r["tempo"] = _song_tempo(r["song_id"])
                 return self._json({
                     "facet": facet,
                     "seed": {"song_id": sid, "moment_idx": mi,
