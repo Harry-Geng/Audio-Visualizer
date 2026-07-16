@@ -1518,16 +1518,44 @@ const Radio = {
     const ac = Transport.ac, g = Transport.master.gain;
     g.cancelScheduledValues(ac.currentTime);
     g.setValueAtTime(Math.max(0.0001, g.value), ac.currentTime);
-    g.exponentialRampToValueAtTime(0.0001, ac.currentTime + this.FADE);
-    // hand off at ~70% of the fade: the exponential ramp is ≈ -56 dB there, so
-    // cutting the tail is inaudible and the next track starts with no dead air.
+    g.exponentialRampToValueAtTime(0.02, ac.currentTime + this.FADE);
+    // hand off ~45% in, while the outgoing is still ~-15 dB: advance() detaches
+    // it onto a tail source that keeps fading UNDER the incoming track — a real
+    // overlap. (The old -56 dB handoff left ~2 s of dead air after the marker.)
     this._fadeT = setTimeout(() => {
       if (Transport.playing) this.advance(); else this.cancelFade();
-    }, this.FADE * 700);
+    }, this.FADE * 450);
+  },
+
+  // keep the outgoing audio fading under the incoming track: a detached
+  // one-shot source that bypasses the master bus (whose gain the incoming's
+  // fade-in is about to ramp up from silence)
+  _startTail() {
+    try {
+      this.stopTail();
+      const buf = Transport.buffers.get("full");
+      const pos = Transport.curTime();
+      if (!buf || !Transport.playing || pos >= buf.duration - 0.1) return;
+      const ac = Transport.ac;
+      const cur = Math.max(0.001, Transport.master.gain.value);
+      const src = ac.createBufferSource(); src.buffer = buf;
+      src.playbackRate.value = Transport._rate;      // seamless if mid-glide
+      const g = ac.createGain();
+      g.gain.setValueAtTime(cur, ac.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0008, ac.currentTime + 3);
+      src.connect(g); g.connect(Transport.limiter || ac.destination);
+      src.start(0, pos);
+      src.stop(ac.currentTime + 3.2);
+      this._tail = { src, g };
+    } catch {}
+  },
+  stopTail() {
+    if (this._tail) { try { this._tail.src.stop(); } catch {} this._tail = null; }
   },
 
   cancelFade() {
     clearTimeout(this._fadeT);
+    this.stopTail();
     this._fadeInPending = false;
     if (this._fading) {
       const ac = Transport.ac, g = Transport.master.gain;
@@ -1544,7 +1572,9 @@ const Radio = {
     this._fadeInPending = false;
     const ac = Transport.ac, g = Transport.master.gain;
     g.cancelScheduledValues(ac.currentTime);
-    g.setValueAtTime(0.0001, ac.currentTime);
+    // start ~-26 dB (not silence): the incoming should be present immediately
+    // under the outgoing tail, then rise to full
+    g.setValueAtTime(Math.max(0.0001, Transport.masterVol * 0.05), ac.currentTime);
     g.linearRampToValueAtTime(Math.max(0.0001, Transport.masterVol), ac.currentTime + this.FADEIN);
     return true;
   },
@@ -1630,6 +1660,7 @@ const Radio = {
       this.history.push(S.songId);
       if (this.history.length > 12) this.history.shift();
       const outTempo = (S.meta.features && S.meta.features.tempo) || 0;
+      this._startTail();               // outgoing keeps fading under the incoming
       this._fadeInPending = true;                        // ease the entry in
       els.song.value = nx.song_id;
       await loadSong(nx.song_id);
