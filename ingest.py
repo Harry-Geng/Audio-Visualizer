@@ -328,7 +328,14 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False, six_stem
             # 1. keep a soundfile-readable original for full-quality playback
             _set(job, "separating", "saving original…")
             orig_dest = os.path.join(LIBRARY_DIR, f"{song_id}.flac")
-            y_orig, sr_orig = sf.read(src_path, always_2d=True)
+            try:
+                y_orig, sr_orig = sf.read(src_path, always_2d=True)
+            except (RuntimeError, sf.LibsndfileError):
+                # libsndfile can't decode m4a/aac although the UI accepts them;
+                # fall back to librosa (audioread/ffmpeg) and reshape its
+                # (ch, n) output to the (n, ch) shape sf.read returns
+                y_lr, sr_orig = librosa.load(src_path, sr=None, mono=False)
+                y_orig = np.atleast_2d(y_lr).T
             sf.write(orig_dest, y_orig, sr_orig)
 
             use_hq_voc = hq_vocals and separator_available()

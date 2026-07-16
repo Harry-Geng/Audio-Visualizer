@@ -13,10 +13,13 @@ import numpy as np
 import librosa
 
 from config import SR, HOP_LENGTH
-from interactions import BASE_STEMS
+from interactions import BASE_STEMS, _RMS_ABS_FLOOR
 
 _ONSET_REL_THRESH = 0.3      # onset-strength fraction counted as a hit
 _ACTIVE_REL_THRESH = 0.15    # RMS fraction of stem peak counted as "present"
+# _RMS_ABS_FLOOR (interactions.py, ~-60 dBFS): the thresholds above are relative
+# to the stem's own peak, so a bleed-only near-silent stem would otherwise read
+# as fully active with dense onsets. Frames below the floor never count.
 
 # Fixed ordered layout → stable descriptor vector.
 FEATURE_NAMES = (
@@ -57,11 +60,15 @@ def moment_descriptors(sa, start_t, end_t) -> dict:
             continue
         seg = rms[f0:f1]
         out[f"{s}_rms"] = float(seg.mean())
-        out[f"{s}_active_frac"] = float((seg > sa.peak[s] * _ACTIVE_REL_THRESH).mean())
+        active_thr = max(sa.peak[s] * _ACTIVE_REL_THRESH, _RMS_ABS_FLOOR)
+        out[f"{s}_active_frac"] = float((seg > active_thr).mean())
         if onset is not None:
             o = onset[f0:f1]
             thr = (o.max() + 1e-9) * _ONSET_REL_THRESH
-            hits = (o > thr).sum()
+            # onset hits only count on frames whose RMS clears the absolute
+            # floor — the onset threshold alone is relative to the window max
+            m = min(o.size, seg.size)
+            hits = ((o[:m] > thr) & (seg[:m] > _RMS_ABS_FLOOR)).sum()
             out[f"{s}_onset_density"] = float(hits / max(1e-6, (end_t - start_t)))
         else:
             out[f"{s}_onset_density"] = 0.0

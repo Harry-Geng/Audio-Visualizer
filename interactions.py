@@ -41,6 +41,10 @@ FEATURE_NAMES = (
 _KICK_SOS = butter(4, 120, btype="lowpass", fs=SR, output="sos")
 _GROOVE_MAX_LAG = 4          # frames (~93 ms) to search for kick/bass alignment
 _DENSITY_REL_THRESH = 0.15   # stem "active" if RMS > this fraction of its own peak
+# Absolute RMS floor (~-60 dBFS; stems are float in [-1, 1]) below which a stem
+# frame never counts as active — a bleed-only near-silent stem otherwise reads
+# as fully active because the thresholds above are relative to its own peak.
+_RMS_ABS_FLOOR = 1e-3
 
 
 def _safe_corr(a, b):
@@ -145,7 +149,8 @@ class StemAnalysis:
         shares = {}          # per-stem mean energy in the window
         present = [s for s in BASE_STEMS if s in self.rms]
         mat = np.stack([self.rms[s][f0:f1] for s in present])      # [stems, frames]
-        thr = np.array([[self.peak[s] * _DENSITY_REL_THRESH] for s in present])
+        thr = np.array([[max(self.peak[s] * _DENSITY_REL_THRESH, _RMS_ABS_FLOOR)]
+                        for s in present])
         active = (mat > thr).sum(axis=0).astype(np.float32)
         total = mat.sum(axis=0) + 1e-9
         share = (mat.mean(axis=1) / (mat.mean(axis=1).sum() + 1e-9))

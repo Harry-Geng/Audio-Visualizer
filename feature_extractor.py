@@ -14,6 +14,13 @@ _KK_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53,
 # smoothing window in frames (~0.15s at 43 fps)
 _SMOOTH = 7
 
+# Band-split gating: peak-normalising a band's onset envelope turns pure noise
+# into full-scale activity (a hat-less song shows a busy hat lane). A band only
+# emits an envelope/onsets when its RMS clears an absolute floor (~-60 dBFS,
+# stems are float in [-1, 1]) AND ~1% of its parent stem's RMS.
+_BAND_ABS_RMS_FLOOR = 1e-3
+_BAND_REL_RMS_FLOOR = 0.01
+
 
 def _estimate_key_mode(waveform: np.ndarray) -> tuple[int, int]:
     chroma = librosa.feature.chroma_cqt(y=waveform, sr=SR, hop_length=HOP_LENGTH)
@@ -97,7 +104,12 @@ def _phrase_boundaries(rms: np.ndarray) -> list:
     ends = np.where(diffs == -1)[0]
     if len(starts) == 0:
         return []
-    if len(ends) == 0 or ends[0] < starts[0]:
+    if len(ends) > 0 and ends[0] < starts[0]:
+        # song opens inside a dip: drop the orphan leading end so each
+        # remaining end pairs with the start of the SAME dip
+        ends = ends[1:]
+    if len(starts) > len(ends):
+        # song ends inside a dip: close the final dip at the last frame
         ends = np.append(ends, len(rms) - 1)
     n = min(len(starts), len(ends))
     centers = ((starts[:n] + ends[:n]) / 2).astype(int)
@@ -108,12 +120,22 @@ def _band_split_envelopes(wave: np.ndarray, bands: dict) -> dict:
     """Filter `wave` into each named band, compute peak-normalised
     onset envelope + onset times per band."""
     w = wave.astype(np.float32, copy=False)
+    parent_rms = float(np.sqrt(np.mean(w.astype(np.float64) ** 2)))
     out = {}
     for name, sos in bands.items():
         band = sosfiltfilt(sos, w).astype(np.float32, copy=False)
         onset_env = librosa.onset.onset_strength(
             y=band, sr=SR, hop_length=HOP_LENGTH
         )
+        band_rms = float(np.sqrt(np.mean(band.astype(np.float64) ** 2)))
+        if (band_rms < _BAND_ABS_RMS_FLOOR
+                or band_rms < parent_rms * _BAND_REL_RMS_FLOOR):
+            # near-silent band: don't peak-normalise noise to full scale
+            out[name] = {
+                "onset_envelope": np.zeros_like(onset_env, dtype=np.float32).tolist(),
+                "onset_times": [],
+            }
+            continue
         peak = float(onset_env.max()) + 1e-10
         env_norm = (onset_env / peak).astype(np.float32)
         onset_frames = librosa.onset.onset_detect(
