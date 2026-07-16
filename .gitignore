@@ -55,3 +55,6 @@ demo_songs/
 
 # LaTeX build artifacts
 textbook/build/
+
+# portable tunnel binary for share.bat (downloaded, 50MB)
+cloudflared.exe

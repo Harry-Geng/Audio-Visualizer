@@ -61,6 +61,16 @@ Re-run `compute_galaxy.py` / `backfill_clap.py` after adding a batch of new song
 to fold them in. (✧ similar and 📻 radio build their index automatically when the
 server starts — no step needed.)
 
+## Show friends your library (temporary link)
+
+**Double-click `share.bat`** — it starts a **read-only** copy of the app on your
+full library and opens a free Cloudflare quick tunnel, printing an
+`https://….trycloudflare.com` link you can send to anyone. Friends get the whole
+experience (galaxy, radio, taste, search) but can't add music. Close the window
+to stop sharing. Anyone with the link can listen while it's up, so run it only
+while you're showing people. Needs `cloudflared` (`winget install
+Cloudflare.cloudflared`, or drop `cloudflared.exe` next to the script).
+
 ## Where your music library lives
 
 By default everything is stored **inside this folder**. If your collection gets
