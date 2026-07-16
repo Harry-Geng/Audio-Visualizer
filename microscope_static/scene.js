@@ -71,9 +71,12 @@ const Scene = {
 
     document.querySelectorAll("#scene-styles button").forEach(b => {
       b.onclick = () => {
-        this.style = b.dataset.s;
+        const s = b.dataset.s, wasEq = this.style === "eq";
+        this.style = s;
         document.querySelectorAll("#scene-styles button").forEach(x => x.classList.toggle("on", x === b));
         this.events.length = 0; this.particles.length = 0;
+        if (s === "eq") this.enterEq();
+        else if (wasEq) this.exitEq();
       };
     });
 
@@ -89,18 +92,35 @@ const Scene = {
     window.addEventListener("resize", () => { if (this.on) this.resize(); });
   },
 
+  // EQ style: an interactive per-stem EQ that lives inside the visualizer. It
+  // swaps Transport into eqMode (audible filtered stems) and shows the EQ lane
+  // grid over the scene canvas; picking any other style returns to the visuals.
+  enterEq() {
+    document.body.classList.add("scene-eq");
+    EQ.activate();               // build + size + render loop (needs the grid visible first)
+    Transport.setEqMode(true);   // also clears sceneMode + restarts sources
+  },
+  exitEq() {
+    EQ.deactivate();
+    document.body.classList.remove("scene-eq");
+    Transport.setSceneMode(true);
+  },
+
   toggle() {
     this.on = !this.on;
     document.body.classList.toggle("scene", this.on);
     this.hud.hidden = !this.on;
     this.btn.classList.toggle("on", this.on);
-    Transport.setSceneMode(this.on);
     if (this.on) {
+      if (this.style === "eq") this.enterEq();
+      else Transport.setSceneMode(true);
       this.build(); this.resize();
       this.t0 = performance.now(); this.lastNow = this.t0;
       cancelAnimationFrame(this.raf); this.loop();
     } else {
       cancelAnimationFrame(this.raf);
+      if (this.style === "eq") { EQ.deactivate(); document.body.classList.remove("scene-eq"); Transport.setEqMode(false); }
+      else Transport.setSceneMode(false);
       // Back to the stem view. Its canvases may have been (re)built while hidden
       // (body.scene sets display:none → getBoundingClientRect is 0), e.g. when
       // switching songs while in scene mode — which leaves them blank. Re-measure
@@ -470,6 +490,7 @@ const Scene = {
   loop() {
     this.raf = requestAnimationFrame(() => this.loop());
     if (!this.on) return;
+    if (this.style === "eq") return;   // EQ style renders on its own lane canvases
     const now = performance.now();
     this.clock = (now - this.t0) / 1000;
     this.dt = Math.min(0.05, (now - this.lastNow) / 1000); this.lastNow = now;

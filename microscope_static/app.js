@@ -2542,7 +2542,7 @@ updateReadout = function () {
 // BiquadFilter chain that Transport.startSources builds in eqMode.
 // ==========================================================================
 const EQ = {
-  on: false, raf: 0, lanes: [], builtFor: null, bands: {}, drag: null,
+  active: false, raf: 0, lanes: [], builtFor: null, bands: {}, drag: null,
   GMIN: -15, GMAX: 15,                 // dB drag range (vertical)
   FAX: [30, 17000],                    // frequency axis, Hz (log)
   MIDMIN: 250, MIDMAX: 6000,           // MID peak centre-frequency drag range
@@ -2550,7 +2550,7 @@ const EQ = {
   TOP_PAD: 26,                         // headroom so the spectrum/curve never touch the top edge
 
   setup() {
-    window.addEventListener("resize", () => { if (this.on) this.resize(); });
+    window.addEventListener("resize", () => { if (this.active) this.resize(); });
   },
 
   // stored band state per stem (dB gains + filter frequencies), default flat
@@ -2574,13 +2574,16 @@ const EQ = {
     return { input: low, output: high, nodes: { low, mid, high } };
   },
 
-  toggle() {
-    this.on = !this.on;
-    els.eq.hidden = !this.on;
-    els.eqBtn.classList.toggle("on", this.on);
-    Transport.setEqMode(this.on);
-    if (this.on) { this.build(); this.resize(); cancelAnimationFrame(this.raf); this.loop(); }
-    else { cancelAnimationFrame(this.raf); }
+  // EQ is a scene style: Scene toggles Transport.eqMode + the body.scene-eq class
+  // and calls these; EQ owns only its lanes/rendering.
+  activate() {
+    this.active = true;
+    this.build(); this.resize();
+    cancelAnimationFrame(this.raf); this.loop();
+  },
+  deactivate() {
+    this.active = false;
+    cancelAnimationFrame(this.raf);
   },
 
   flatten() {
@@ -2700,7 +2703,7 @@ const EQ = {
 
   loop() {
     this.raf = requestAnimationFrame(() => this.loop());
-    if (!this.on) return;
+    if (!this.active) return;
     if (S.meta && this.builtFor !== S.songId) { this.build(); this.resize(); }
     for (const lane of this.lanes) this.drawLane(lane);
   },

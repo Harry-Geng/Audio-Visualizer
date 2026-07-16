@@ -528,3 +528,39 @@ footer .hints { margin-left: auto; }
 #legend .sw.beat { border-left: 2px solid rgba(255,255,255,.3); }
 #legend .sw.phrase { border-left: 2px dashed rgba(120,200,255,.85); }
 kbd { background:#1c1f29; border:1px solid var(--line); border-radius:3px; padding:0 4px; color:var(--text); }
+
+/* per-stem EQ — a style inside the visualizer (#scene). The lane grid overlays
+   the scene canvas and is shown only while the EQ style is active. */
+#eq-lanes {
+  position: absolute; left: 0; right: 0; top: 0; bottom: 84px;
+  display: none; gap: 10px; padding: 14px;
+  grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr;   /* 2×2 grid of stems */
+}
+body.scene-eq #eq-lanes { display: grid; }
+body.scene-eq #scene-canvas, body.scene-eq #scene-gl { display: none !important; }
+body.scene-eq #scene-insts, body.scene-eq #scene-hint-def { display: none; }
+/* narrow screens: fall back to a single column */
+@media (max-width: 680px) { #eq-lanes { grid-template-columns: 1fr; } }
+
+.eq-lane {
+  min-height: 0; min-width: 0; position: relative;
+  border: 1px solid rgba(255, 255, 255, .05); border-radius: 14px; overflow: hidden;
+  background: linear-gradient(180deg, #10131b, #0a0c11 70%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 4px 16px rgba(0, 0, 0, .38);
+}
+.eq-lane canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+  cursor: grab; touch-action: none;
+}
+.eq-lane canvas:active { cursor: grabbing; }
+.eq-empty { margin: auto; color: var(--dim); font-style: italic; font-size: 13px; }
+
+/* EQ controls live in the scene HUD, shown only in the EQ style */
+#eq-flat, #scene-hint-eq { display: none; }
+body.scene-eq #eq-flat { display: inline-block; }
+body.scene-eq #scene-hint-eq { display: block; }
+#eq-flat {
+  background: rgba(20, 22, 29, .8); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; font-size: 12px; padding: 6px 12px; cursor: pointer;
+}
+#eq-flat:hover { background: #2a3550; border-color: #7fd0ff; }

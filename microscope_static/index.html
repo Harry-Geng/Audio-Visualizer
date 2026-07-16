@@ -50,7 +50,7 @@
       </div>
     </div>
     <button id="live-btn">● live</button>
-    <button id="scene-btn">✦ scene</button>
+    <button id="scene-btn">✦ visualizer</button>
     <button id="lyrics-btn" title="synced lyrics (karaoke)">☰ lyrics</button>
     <button id="sim-btn" title="find moments across the library that sound like the current spot">✧ similar</button>
     <button id="gal-btn" title="galaxy map — every moment of every song as a starfield">✹ map</button>
@@ -101,6 +101,7 @@
   <div id="scene" hidden>
     <canvas id="scene-canvas"></canvas>
     <canvas id="scene-gl"></canvas>
+    <div id="eq-lanes"></div>
     <div id="scene-hud">
       <div class="styles" id="scene-styles">
         <button data-s="stage" class="on">🎭 stage</button>
@@ -113,9 +114,12 @@
         <button data-s="field">field</button>
         <button data-s="roll">piano-roll</button>
         <button data-s="geometry">geometry</button>
+        <button data-s="eq">🎚 EQ</button>
       </div>
       <div id="scene-insts"></div>
-      <div class="scene-hint">drag = rotate · click an instrument chip = solo · <kbd>space</kbd> = play</div>
+      <button id="eq-flat" title="flatten every band back to 0 dB">↺ flat</button>
+      <div class="scene-hint" id="scene-hint-def">drag = rotate · click an instrument chip = solo · <kbd>space</kbd> = play</div>
+      <div class="scene-hint" id="scene-hint-eq">drag <b>LOW · MID · HIGH</b> to shape each stem · MID drags sideways · double-click a dot = reset · <kbd>space</kbd> = play</div>
     </div>
   </div>
 
