@@ -1488,6 +1488,8 @@ const Radio = {
   _fading: false, _fadeT: null, _fadeInPending: false,
   _joinT: null, _nextBuf: null, _nextBufFor: null,
   _pickP: null, _lastPickAt: 0, _iv: null,
+  _style: "fade", _lastStyle: null, _swapDelay: 4,   // transition style state
+  _acapBuf: null, _acapFor: null,                    // outgoing vocals (acapella blend)
 
   toggle() {
     this.on = !this.on;
@@ -1502,7 +1504,8 @@ const Radio = {
       if (S.songId) this.pick(true);
     } else {
       this.cancelFade();
-      this._nextBuf = null; this._nextBufFor = null;   // release the predecoded buffer
+      this._nextBuf = null; this._nextBufFor = null;   // release the predecoded buffers
+      this._acapBuf = null; this._acapFor = null;
     }
   },
 
@@ -1535,30 +1538,99 @@ const Radio = {
     }, this.FADE * 450);
   },
 
-  // keep the outgoing audio fading under the incoming track: a detached
-  // one-shot source that bypasses the master bus (whose gain the incoming's
-  // fade-in is about to ramp up from silence)
-  _startTail() {
+  // keep the outgoing audio going under the incoming track on detached one-shot
+  // sources that bypass the master bus (whose gain the incoming's fade-in is
+  // about to ramp up from silence). Shape depends on the transition style.
+  _startTail(style, tempo) {
     try {
       this.stopTail();
-      const buf = Transport.buffers.get("full");
+      if (!Transport.playing) return;
+      const ac = Transport.ac, out = Transport.limiter || ac.destination;
+      const full = Transport.buffers.get("full");
       const pos = Transport.curTime();
-      if (!buf || !Transport.playing || pos >= buf.duration - 0.1) return;
-      const ac = Transport.ac;
       const cur = Math.max(0.001, Transport.master.gain.value);
-      const src = ac.createBufferSource(); src.buffer = buf;
-      src.playbackRate.value = Transport._rate;      // seamless if mid-glide
-      const g = ac.createGain();
-      g.gain.setValueAtTime(cur, ac.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.0008, ac.currentTime + 3);
-      src.connect(g); g.connect(Transport.limiter || ac.destination);
-      src.start(0, pos);
-      src.stop(ac.currentTime + 3.2);
-      this._tail = { src, g };
+      const t0 = ac.currentTime;
+      const srcs = [];
+      const mk = buf => {
+        const s = ac.createBufferSource(); s.buffer = buf;
+        s.playbackRate.value = Transport._rate;      // seamless if mid-glide
+        return s;
+      };
+
+      if (style === "acapella" && this._acapBuf && this._acapFor === S.songId) {
+        // the outgoing band exits quickly; its ISOLATED VOCALS keep riding
+        // over the incoming track's intro, then bow out
+        if (full && pos < full.duration - 0.1) {
+          const s = mk(full), g = ac.createGain();
+          g.gain.setValueAtTime(cur, t0);
+          g.gain.exponentialRampToValueAtTime(0.0008, t0 + 1.2);
+          s.connect(g); g.connect(out); s.start(0, pos); s.stop(t0 + 1.4);
+          srcs.push(s);
+        }
+        if (pos < this._acapBuf.duration - 0.1) {
+          const v = mk(this._acapBuf), gv = ac.createGain();
+          const hold = Math.max(0.15, Transport.masterVol * 0.9);
+          gv.gain.setValueAtTime(Math.max(cur, hold * 0.7), t0);
+          gv.gain.linearRampToValueAtTime(hold, t0 + 0.4);
+          gv.gain.setValueAtTime(hold, t0 + 4.5);
+          gv.gain.exponentialRampToValueAtTime(0.0008, t0 + 6.5);
+          v.connect(gv); gv.connect(out); v.start(0, pos); v.stop(t0 + 6.7);
+          srcs.push(v);
+        }
+      } else if (style === "echo" && full && pos < full.duration - 0.1) {
+        // echo out: the dry signal cuts fast while a beat-synced feedback
+        // delay rings its last phrase over the incoming track
+        const s = mk(full);
+        const dry = ac.createGain();
+        dry.gain.setValueAtTime(cur, t0);
+        dry.gain.exponentialRampToValueAtTime(0.001, t0 + 0.6);
+        const send = ac.createGain(); send.gain.value = cur;      // pre-fade send
+        const beat = tempo ? 60 / tempo : 0.45;
+        const delay = ac.createDelay(2.0);
+        delay.delayTime.value = Math.min(1.9, beat * 0.75);       // dotted eighth
+        const fb = ac.createGain(); fb.gain.value = 0.5;
+        const wet = ac.createGain();
+        wet.gain.setValueAtTime(cur * 0.9, t0);
+        wet.gain.exponentialRampToValueAtTime(0.0008, t0 + 5.5);
+        s.connect(dry); dry.connect(out);
+        s.connect(send); send.connect(delay);
+        delay.connect(fb); fb.connect(delay);
+        delay.connect(wet); wet.connect(out);
+        s.start(0, pos); s.stop(t0 + 0.8);                        // input = last phrase only
+        setTimeout(() => { try { delay.disconnect(); fb.disconnect(); wet.disconnect(); } catch {} }, 6500);
+        srcs.push(s);
+      } else if (full && pos < full.duration - 0.1) {
+        // plain crossfade tail — also used under a bass swap: the outgoing
+        // keeps its lows while it fades, the incoming's lows arrive as it goes
+        const s = mk(full), g = ac.createGain();
+        const dur = style === "bassswap" ? 4.2 : 3;
+        g.gain.setValueAtTime(cur, t0);
+        g.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+        s.connect(g); g.connect(out); s.start(0, pos); s.stop(t0 + dur + 0.2);
+        srcs.push(s);
+      }
+      this._tail = { srcs };
     } catch {}
   },
   stopTail() {
-    if (this._tail) { try { this._tail.src.stop(); } catch {} this._tail = null; }
+    if (this._tail) {
+      for (const s of (this._tail.srcs || [])) { try { s.stop(); } catch {} }
+      this._tail = null;
+    }
+  },
+
+  // predecode the CURRENT song's isolated vocals during the outro so an
+  // acapella blend is possible at handoff (only fetched when radio is on)
+  async _predecodeAcap() {
+    const sid = S.songId;
+    if (!sid || (this._acapFor === sid && this._acapBuf)) return;
+    this._acapBuf = null; this._acapFor = sid;
+    try {
+      const ab = await fetch(`/api/audio?id=${encodeURIComponent(sid)}&track=vocals`)
+        .then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); });
+      const buf = await Transport.ac.decodeAudioData(ab);
+      if (this._acapFor === sid) this._acapBuf = buf;
+    } catch {}
   },
 
   cancelFade() {
@@ -1579,11 +1651,31 @@ const Radio = {
     if (!this._fadeInPending) return false;
     this._fadeInPending = false;
     const ac = Transport.ac, g = Transport.master.gain;
-    g.cancelScheduledValues(ac.currentTime);
-    // start ~-26 dB (not silence): the incoming should be present immediately
-    // under the outgoing tail, then rise to full
-    g.setValueAtTime(Math.max(0.0001, Transport.masterVol * 0.05), ac.currentTime);
-    g.linearRampToValueAtTime(Math.max(0.0001, Transport.masterVol), ac.currentTime + this.FADEIN);
+    const t0 = ac.currentTime;
+    const vol = Math.max(0.0001, Transport.masterVol);
+    g.cancelScheduledValues(t0);
+    const style = this._style || "fade";
+    if (style === "bassswap" && Transport.radioHP) {
+      // classic EQ bass swap: the incoming enters with its lows cut (so the
+      // outgoing tail owns the low end), at a healthy level; ~2 bars in, the
+      // filter sweeps open ON A BEAT and the new bass drops
+      const hp = Transport.radioHP.frequency;
+      hp.cancelScheduledValues(t0);
+      hp.setValueAtTime(240, t0);
+      const swapAt = t0 + (this._swapDelay || 4);
+      hp.setValueAtTime(240, Math.max(t0, swapAt - 0.05));
+      hp.exponentialRampToValueAtTime(24, swapAt + 0.7);
+      g.setValueAtTime(vol * 0.25, t0);
+      g.linearRampToValueAtTime(vol, t0 + this.FADEIN);
+    } else if (style === "acapella") {
+      // the incoming bed rises a touch faster under the riding vocal
+      g.setValueAtTime(vol * 0.12, t0);
+      g.linearRampToValueAtTime(vol, t0 + Math.max(2, this.FADEIN - 0.5));
+    } else {
+      // start ~-26 dB (not silence): present immediately under the tail
+      g.setValueAtTime(vol * 0.05, t0);
+      g.linearRampToValueAtTime(vol, t0 + this.FADEIN);
+    }
     return true;
   },
 
@@ -1657,7 +1749,18 @@ const Radio = {
     }
     this._next = cand;
     this.showNext();
-    if (cand && this.on) this.predecode(cand.song_id);   // decode now → gapless switch
+    if (cand && this.on) {
+      this.predecode(cand.song_id);        // decode now → gapless switch
+      // if the pair is tempo-matchable, an acapella blend is possible —
+      // predecode the CURRENT song's vocals so handoff can use them
+      const curTempo = (S.meta.features && S.meta.features.tempo) || 0;
+      if (curTempo && cand._tempo) {
+        let q = curTempo / cand._tempo;
+        while (q > 1.5) q /= 2;
+        while (q < 0.67) q *= 2;
+        if (q >= 0.96 && q <= 1.04) this._predecodeAcap();
+      }
+    }
   },
 
   // fetch + decode the next song's full mix during the outro, so the switch
@@ -1673,9 +1776,10 @@ const Radio = {
 
   showNext() {
     els.tbarNextLabel.textContent = this._next ? `${this._next.song_id}` : "…";
-    els.tbarNext.title = this._next
+    els.tbarNext.title = (this._next
       ? `up next: ${this._next.song_id} (joins at ${lsTime(this._next.start_t || 0)}) — click to skip there now`
-      : "picking the next track…";
+      : "picking the next track…")
+      + (this._lastStyle ? ` · last transition: ${this._lastStyle}` : "");
   },
 
   async advance() {
@@ -1690,7 +1794,24 @@ const Radio = {
       this.history.push(S.songId);
       if (this.history.length > 12) this.history.shift();
       const outTempo = (S.meta.features && S.meta.features.tempo) || 0;
-      this._startTail();               // outgoing keeps fading under the incoming
+      // ── tempo match + transition style (needed BEFORE the tail starts) ──
+      let rate = 1, matchable = false;
+      if (outTempo && nx._tempo) {
+        let r = outTempo / nx._tempo;
+        while (r > 1.5) r /= 2;                          // half/double-time equivalence
+        while (r < 0.67) r *= 2;
+        if (r >= 0.94 && r <= 1.06) { rate = r; matchable = true; }
+      }
+      const acapReady = this._acapBuf && this._acapFor === S.songId;
+      let style = "fade";
+      if (matchable && acapReady && Math.abs(rate - 1) <= 0.04 && Math.random() < 0.35)
+        style = "acapella";                              // vocals ride the new intro
+      else if (matchable) style = "bassswap";            // the club standard
+      else if (outTempo && nx._tempo) style = "echo";    // unmatchable tempos
+      this._style = this._lastStyle = style;
+      console.log(`[radio] ${style} transition → ${nx.song_id}`
+                  + (rate !== 1 ? ` (rate ${rate.toFixed(3)})` : ""));
+      this._startTail(style, outTempo);  // outgoing continues under the incoming
       this._fadeInPending = true;                        // ease the entry in
       els.song.value = nx.song_id;
       await loadSong(nx.song_id);
@@ -1734,12 +1855,13 @@ const Radio = {
         }
         joinT = Math.max(0, target);
       }
-      let rate = 1;
-      if (outTempo && nx._tempo) {
-        let r = outTempo / nx._tempo;
-        while (r > 1.5) r /= 2;                          // half/double-time equivalence
-        while (r < 0.67) r *= 2;
-        if (r >= 0.94 && r <= 1.06) rate = r;
+      // bass swap: sweep the lows open on a beat ~2 bars (8 beats) after entry
+      this._swapDelay = 4;
+      if (style === "bassswap" && nx._beats && nx._beats.length) {
+        let i0 = nx._beats.findIndex(b => b >= joinT - 0.01);
+        if (i0 < 0) i0 = nx._beats.length - 1;
+        const swapBeat = nx._beats[Math.min(i0 + 8, nx._beats.length - 1)];
+        this._swapDelay = Math.max(1.5, Math.min(8, (swapBeat - joinT) / rate));
       }
       Transport._rate = rate;                            // sources start tempo-matched
       Transport.seek(joinT);
@@ -1773,17 +1895,28 @@ const Transport = {
   init() {
     this.ac = new (window.AudioContext || window.webkitAudioContext)();
     this.master = this.ac.createGain();
+    // radio bass-swap filter: idles fully open (24 Hz); the radio sweeps it
+    // closed/open to do the classic EQ low-cut on an incoming track
+    this.radioHP = this.ac.createBiquadFilter();
+    this.radioHP.type = "highpass";
+    this.radioHP.frequency.value = 24;
+    this.radioHP.Q.value = 0.4;
     // safety limiter: hot stem sums / boosted faders squash instead of clipping
     this.limiter = this.ac.createDynamicsCompressor();
     this.limiter.threshold.value = -3; this.limiter.knee.value = 0;
     this.limiter.ratio.value = 20; this.limiter.attack.value = 0.002;
     this.limiter.release.value = 0.15;
-    this.master.connect(this.limiter); this.limiter.connect(this.ac.destination);
+    this.master.connect(this.radioHP); this.radioHP.connect(this.limiter);
+    this.limiter.connect(this.ac.destination);
     requestAnimationFrame(() => this.tick());
   },
   reset() {
     this.stopSources(); this.playing = false; this.offset = 0;
     this._rate = 1;                           // rate-matching never outlives a song switch
+    if (this.radioHP && this.ac) {            // reopen the bass-swap filter
+      this.radioHP.frequency.cancelScheduledValues(this.ac.currentTime);
+      this.radioHP.frequency.value = 24;
+    }
     this._bufGen = (this._bufGen || 0) + 1;   // in-flight decodes may not repopulate
     this.buffers.clear(); this.loading.clear();
     els.play.textContent = "▶ play"; els.play.classList.remove("on");
@@ -2382,6 +2515,248 @@ updateReadout = function () {
   if (S.meta && (S.rows.some(r => r.solo || r.mute))) {
     els.readout.innerHTML += ` · <b>${Transport.quality()}</b>`;
   }
+};
+
+// ==========================================================================
+// Per-stem EQ + live spectrum view. One lane per base stem; each lane draws
+// that stem's live FFT (colourful bars) plus an interactive 3-band EQ curve
+// (LOW shelf · MID peak · HIGH shelf). Dragging a node changes gain (and, for
+// MID, centre frequency) and filters the stem's audio in real time via the
+// BiquadFilter chain that Transport.startSources builds in eqMode.
+// ==========================================================================
+const EQ = {
+  on: false, raf: 0, lanes: [], builtFor: null, bands: {}, drag: null,
+  GMIN: -15, GMAX: 15,                 // dB drag range (vertical)
+  FAX: [30, 17000],                    // frequency axis, Hz (log)
+  MIDMIN: 250, MIDMAX: 6000,           // MID peak centre-frequency drag range
+  LABEL_H: 20,                         // px reserved at the bottom for LOW/MID/HIGH
+
+  setup() {
+    window.addEventListener("resize", () => { if (this.on) this.resize(); });
+  },
+
+  // stored band state per stem (dB gains + filter frequencies), default flat
+  bandState(id) {
+    if (!this.bands[id]) this.bands[id] = {
+      low:  { f: 160,  g: 0 },
+      mid:  { f: 1000, g: 0, q: 1.0 },
+      high: { f: 2800, g: 0 },
+    };
+    return this.bands[id];
+  },
+
+  // build the live BiquadFilter chain for one stem from its stored state.
+  // Called by Transport.startSources; returns {input, output, nodes}.
+  makeChain(ac, id) {
+    const b = this.bandState(id);
+    const low = ac.createBiquadFilter();  low.type = "lowshelf";  low.frequency.value = b.low.f;  low.gain.value = b.low.g;
+    const mid = ac.createBiquadFilter();  mid.type = "peaking";   mid.frequency.value = b.mid.f;  mid.Q.value = b.mid.q; mid.gain.value = b.mid.g;
+    const high = ac.createBiquadFilter(); high.type = "highshelf"; high.frequency.value = b.high.f; high.gain.value = b.high.g;
+    low.connect(mid); mid.connect(high);
+    return { input: low, output: high, nodes: { low, mid, high } };
+  },
+
+  toggle() {
+    this.on = !this.on;
+    els.eq.hidden = !this.on;
+    els.eqBtn.classList.toggle("on", this.on);
+    Transport.setEqMode(this.on);
+    if (this.on) { this.build(); this.resize(); cancelAnimationFrame(this.raf); this.loop(); }
+    else { cancelAnimationFrame(this.raf); }
+  },
+
+  flatten() {
+    for (const id in this.bands) {
+      const b = this.bands[id];
+      b.low.g = 0; b.mid.g = 0; b.high.g = 0; b.mid.f = 1000;
+      this.applyLive(id);
+    }
+  },
+
+  // push stored params to any live filter nodes without restarting playback
+  applyLive(id) {
+    const f = Transport.eqFilters && Transport.eqFilters[id]; if (!f) return;
+    const b = this.bands[id], t = Transport.ac.currentTime;
+    try {
+      f.low.gain.setTargetAtTime(b.low.g, t, 0.01);
+      f.mid.gain.setTargetAtTime(b.mid.g, t, 0.01);
+      f.mid.frequency.setTargetAtTime(b.mid.f, t, 0.01);
+      f.high.gain.setTargetAtTime(b.high.g, t, 0.01);
+    } catch {}
+  },
+
+  build() {
+    if (!S.meta) { els.eqLanes.innerHTML = '<div class="eq-empty">load a song to shape its stems</div>'; this.lanes = []; this.builtFor = null; return; }
+    const base = S.meta.tracks.filter(t => t.depth === 0 && t.id !== "mix" && STEMS.includes(t.id));
+    els.eqLanes.innerHTML = "";
+    this.lanes = base.map(t => {
+      const wrap = document.createElement("div"); wrap.className = "eq-lane";
+      const cv = document.createElement("canvas");
+      wrap.appendChild(cv); els.eqLanes.appendChild(wrap);
+      const lane = { id: t.id, label: t.label, color: trackColor(t), cv, ctx: cv.getContext("2d"),
+                     freq: new Uint8Array(1024) };
+      this.bandState(t.id); this.bindLane(lane);
+      return lane;
+    });
+    this.builtFor = S.songId;
+  },
+
+  resize() {
+    const dpr = DPR();
+    for (const lane of this.lanes) {
+      const W = lane.cv.clientWidth || 1, H = lane.cv.clientHeight || 1;
+      lane.cv.width = Math.round(W * dpr); lane.cv.height = Math.round(H * dpr);
+    }
+  },
+
+  // ---- geometry (all in CSS px; the canvas is scaled by DPR at draw time) --
+  xForFreq(f, W) { const [a, z] = this.FAX; f = clamp(f, a, z); return Math.log(f / a) / Math.log(z / a) * W; },
+  freqForX(x, W) { const [a, z] = this.FAX; return a * Math.pow(z / a, clamp(x / W, 0, 1)); },
+  yForDb(db, H) { const p = H - this.LABEL_H; return p * (1 - clamp((db - this.GMIN) / (this.GMAX - this.GMIN), 0, 1)); },
+  dbForY(y, H) { const p = H - this.LABEL_H; return this.GMIN + (1 - clamp(y / p, 0, 1)) * (this.GMAX - this.GMIN); },
+  bright(c) { return c.map(v => Math.round(v + (255 - v) * 0.45)); },
+
+  // approximate combined EQ response in dB (visual — the audio uses real biquads)
+  curveDb(f, b) {
+    const peak = Math.exp(-Math.pow(Math.log2(f / b.mid.f) / 0.85, 2)) * b.mid.g;
+    const low  = b.low.g  / (1 + Math.exp(Math.log2(f / b.low.f)  * 2.2));   // full below corner
+    const high = b.high.g / (1 + Math.exp(-Math.log2(f / b.high.f) * 2.2));  // full above corner
+    return low + peak + high;
+  },
+
+  // the three draggable handles: LOW/HIGH at fixed x (shelf plateaus), MID follows its centre freq
+  nodes(lane, W, H) {
+    const b = this.bands[lane.id];
+    const lowX = W * 0.13, highX = W * 0.87;
+    const at = x => this.yForDb(this.curveDb(this.freqForX(x, W), b), H);
+    return {
+      low:  { band: "low",  x: lowX,  y: at(lowX) },
+      mid:  { band: "mid",  x: this.xForFreq(clamp(b.mid.f, this.MIDMIN, this.MIDMAX), W), y: this.yForDb(this.curveDb(b.mid.f, b), H) },
+      high: { band: "high", x: highX, y: at(highX) },
+    };
+  },
+
+  hit(lane, px, py, W, H, r2) {
+    const ns = this.nodes(lane, W, H); let best = null, bd = r2;
+    for (const k of ["low", "mid", "high"]) {
+      const n = ns[k], dx = px - n.x, dy = py - n.y, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = k; }
+    }
+    return best;
+  },
+
+  applyDrag(lane, node, px, py, W, H) {
+    const b = this.bands[lane.id];
+    const db = clamp(this.dbForY(py, H), this.GMIN, this.GMAX);
+    if (node === "low") b.low.g = db;
+    else if (node === "high") b.high.g = db;
+    else { b.mid.g = db; b.mid.f = clamp(this.freqForX(px, W), this.MIDMIN, this.MIDMAX); }
+    this.applyLive(lane.id);
+  },
+
+  bindLane(lane) {
+    const cv = lane.cv;
+    const pos = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+    cv.addEventListener("pointerdown", e => {
+      const [px, py] = pos(e), W = cv.clientWidth, H = cv.clientHeight;
+      const node = this.hit(lane, px, py, W, H, 26 * 26); if (!node) return;
+      this.drag = { lane, node }; cv.setPointerCapture(e.pointerId);
+      this.applyDrag(lane, node, px, py, W, H);
+    });
+    cv.addEventListener("pointermove", e => {
+      if (!this.drag || this.drag.lane !== lane) return;
+      const [px, py] = pos(e);
+      this.applyDrag(lane, this.drag.node, px, py, cv.clientWidth, cv.clientHeight);
+    });
+    const end = () => { this.drag = null; };
+    cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+    cv.addEventListener("dblclick", e => {
+      const [px, py] = pos(e), W = cv.clientWidth, H = cv.clientHeight, b = this.bands[lane.id];
+      const node = this.hit(lane, px, py, W, H, 30 * 30);
+      if (node === "mid") { b.mid.g = 0; b.mid.f = 1000; }
+      else if (node) b[node].g = 0;
+      else { b.low.g = 0; b.mid.g = 0; b.high.g = 0; b.mid.f = 1000; }   // empty area = flatten lane
+      this.applyLive(lane.id);
+    });
+  },
+
+  loop() {
+    this.raf = requestAnimationFrame(() => this.loop());
+    if (!this.on) return;
+    if (S.meta && this.builtFor !== S.songId) { this.build(); this.resize(); }
+    for (const lane of this.lanes) this.drawLane(lane);
+  },
+
+  drawLane(lane) {
+    const cv = lane.cv, ctx = lane.ctx, dpr = DPR();
+    const W = cv.clientWidth || 1, H = cv.clientHeight || 1;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const plotH = H - this.LABEL_H, col = lane.color, hot = this.bright(col), b = this.bands[lane.id];
+
+    ctx.fillStyle = "rgba(255,255,255,0.015)"; ctx.fillRect(0, 0, W, H);
+
+    // 0 dB baseline
+    const y0 = this.yForDb(0, H);
+    ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, y0); ctx.lineTo(W, y0); ctx.stroke();
+
+    // live spectrum bars (log-frequency, gamma-shaped for punch)
+    const an = Transport.analysers[lane.id];
+    if (an && Transport.ac) {
+      an.getByteFrequencyData(lane.freq);
+      const bins = lane.freq.length, nyq = Transport.ac.sampleRate / 2, bw = 2;
+      for (let x = 0; x < W; x += bw) {
+        const f = this.freqForX(x + bw / 2, W);
+        const bin = clamp(Math.round(f / nyq * bins), 0, bins - 1);
+        const v = lane.freq[bin] / 255; if (v <= 0.01) continue;
+        const h = v * v * plotH;
+        const g = ctx.createLinearGradient(0, plotH, 0, plotH - h);
+        g.addColorStop(0, rgb(col, 0.18)); g.addColorStop(1, rgb(hot, 0.92));
+        ctx.fillStyle = g; ctx.fillRect(x, plotH - h, bw - 0.5, h);
+      }
+    }
+
+    // EQ response curve
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 2) {
+      const y = this.yForDb(this.curveDb(this.freqForX(x, W), b), H);
+      x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = rgb(hot, 0.95); ctx.lineWidth = 2.4; ctx.lineJoin = "round";
+    ctx.shadowColor = rgb(hot, 0.5); ctx.shadowBlur = 6; ctx.stroke(); ctx.shadowBlur = 0;
+
+    // LOW / MID / HIGH guides + labels
+    const ns = this.nodes(lane, W, H);
+    ctx.setLineDash([3, 4]); ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "center";
+    for (const [lab, k] of [["LOW", "low"], ["MID", "mid"], ["HIGH", "high"]]) {
+      const x = ns[k].x;
+      ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke();
+      ctx.fillStyle = "rgba(210,220,235,0.55)"; ctx.fillText(lab, x, H - 6);
+    }
+    ctx.setLineDash([]);
+
+    // draggable nodes
+    for (const k of ["low", "mid", "high"]) {
+      const nd = ns[k];
+      ctx.beginPath(); ctx.arc(nd.x, nd.y, 7, 0, Math.PI * 2);
+      ctx.fillStyle = rgb(hot, 1);
+      ctx.shadowColor = rgb(hot, 0.9); ctx.shadowBlur = 10; ctx.fill(); ctx.shadowBlur = 0;
+      ctx.lineWidth = 2; ctx.strokeStyle = "rgba(10,12,16,0.9)"; ctx.stroke();
+    }
+
+    // stem label + gain readout
+    ctx.textAlign = "left"; ctx.font = "600 13px system-ui, sans-serif";
+    ctx.fillStyle = rgb(hot, 0.95); ctx.fillText(lane.label, 10, 18);
+    const fmt = d => (d >= 0 ? "+" : "") + d.toFixed(0);
+    ctx.textAlign = "right"; ctx.font = "10px ui-monospace, monospace";
+    ctx.fillStyle = "rgba(200,210,225,0.5)";
+    ctx.fillText(`L ${fmt(b.low.g)}  M ${fmt(b.mid.g)}  H ${fmt(b.high.g)} dB`, W - 10, 18);
+  },
 };
 
 init();
