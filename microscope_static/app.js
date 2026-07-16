@@ -2744,20 +2744,24 @@ const EQ = {
         env[i] += (v - env[i]) * 0.35;                       // temporal easing
       }
       const yOf = v => baseY - Math.pow(clamp(v, 0, 1), 1.5) * (baseY - topY);
-      const spectrumPath = () => {
-        ctx.moveTo(0, yOf(env[0]));
+      // trace the crest only — the pen must already sit at the x=0 crest point.
+      // (No moveTo here: a moveTo mid-path would break the fill into a stray
+      // subpath and closePath would slash a diagonal back to the crest.)
+      const traceCrest = () => {
         for (let i = 1; i <= N; i++) {
           const x0 = (i - 1) / N * W, y0 = yOf(env[i - 1]), x1 = i / N * W, y1 = yOf(env[i]);
           ctx.quadraticCurveTo(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
         }
         ctx.lineTo(W, yOf(env[N]));
       };
-      ctx.beginPath(); ctx.moveTo(0, baseY); ctx.lineTo(0, yOf(env[0]));
-      spectrumPath(); ctx.lineTo(W, baseY); ctx.closePath();
+      ctx.beginPath();
+      ctx.moveTo(0, baseY); ctx.lineTo(0, yOf(env[0]));      // up the left edge
+      traceCrest();                                          // across the crest
+      ctx.lineTo(W, baseY); ctx.closePath();                 // down the right, close along the bottom
       const g = ctx.createLinearGradient(0, baseY, 0, topY);
       g.addColorStop(0, rgb(col, 0.05)); g.addColorStop(0.55, rgb(col, 0.32)); g.addColorStop(1, rgb(hot, 0.7));
       ctx.fillStyle = g; ctx.fill();
-      ctx.beginPath(); spectrumPath();                       // soft glowing crest
+      ctx.beginPath(); ctx.moveTo(0, yOf(env[0])); traceCrest();   // soft glowing crest
       ctx.strokeStyle = rgb(hot, 0.5); ctx.lineWidth = 1.5; ctx.lineJoin = "round";
       ctx.shadowColor = rgb(hot, 0.5); ctx.shadowBlur = 8; ctx.stroke(); ctx.shadowBlur = 0;
     }
