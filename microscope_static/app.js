@@ -59,8 +59,7 @@ const els = {
   liveBtn: $("#live-btn"), liveView: $("#live-view"), liveDevice: $("#live-device"),
   liveStart: $("#live-start"), liveStop: $("#live-stop"), liveLevel: $("#live-level"),
   liveHelpBtn: $("#live-help-btn"), liveHelp: $("#live-help"), liveCanvas: $("#live-canvas"),
-  eqBtn: $("#eq-btn"), eq: $("#eq"), eqLanes: $("#eq-lanes"),
-  eqReset: $("#eq-reset"), eqClose: $("#eq-close"),
+  eqLanes: $("#eq-lanes"), eqFlat: $("#eq-flat"),
 };
 const DPR = () => window.devicePixelRatio || 1;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -124,9 +123,7 @@ async function init() {
   els.radioBtn.onclick = () => Radio.toggle();
   els.tasteBtn.onclick = () => Taste.toggle();
   els.tasteClose.onclick = () => Taste.toggle();
-  els.eqBtn.onclick = () => EQ.toggle();
-  els.eqClose.onclick = () => EQ.toggle();
-  els.eqReset.onclick = () => EQ.flatten();
+  els.eqFlat.onclick = () => EQ.flatten();
   els.simHum.onclick = () => Hum.toggle();
   els.tbarNext.onclick = () => Radio.advance();        // skip to the queued track now
   els.simRefresh.onclick = () => Similar.find();
@@ -629,7 +626,6 @@ function setupInteractions() {
       if (Lyrics.visible) Lyrics.toggle();
       if (Galaxy.visible) Galaxy.toggle();
       if (Taste.visible) Taste.toggle();
-      if (EQ.on) EQ.toggle();
       if (e.target.blur) e.target.blur();
       return;
     }
@@ -1599,14 +1595,21 @@ const Radio = {
         s.start(0, pos); s.stop(t0 + 0.8);                        // input = last phrase only
         setTimeout(() => { try { delay.disconnect(); fb.disconnect(); wet.disconnect(); } catch {} }, 6500);
         srcs.push(s);
-      } else if (full && pos < full.duration - 0.1) {
-        // plain crossfade tail — also used under a bass swap: the outgoing
-        // keeps its lows while it fades, the incoming's lows arrive as it goes
+      } else if (style === "bassswap" && full && pos < full.duration - 0.1) {
+        // the outgoing OWNS the low end until the swap: plateau at ~55% well
+        // past the sweep point (≤3.5s), then bow out — never a bassless gap
         const s = mk(full), g = ac.createGain();
-        const dur = style === "bassswap" ? 4.2 : 3;
         g.gain.setValueAtTime(cur, t0);
-        g.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
-        s.connect(g); g.connect(out); s.start(0, pos); s.stop(t0 + dur + 0.2);
+        g.gain.linearRampToValueAtTime(cur * 0.55, t0 + 3.5);
+        g.gain.exponentialRampToValueAtTime(0.0008, t0 + 5.6);
+        s.connect(g); g.connect(out); s.start(0, pos); s.stop(t0 + 5.8);
+        srcs.push(s);
+      } else if (full && pos < full.duration - 0.1) {
+        // plain crossfade tail
+        const s = mk(full), g = ac.createGain();
+        g.gain.setValueAtTime(cur, t0);
+        g.gain.exponentialRampToValueAtTime(0.0008, t0 + 3);
+        s.connect(g); g.connect(out); s.start(0, pos); s.stop(t0 + 3.2);
         srcs.push(s);
       }
       this._tail = { srcs };
@@ -1657,15 +1660,15 @@ const Radio = {
     const style = this._style || "fade";
     if (style === "bassswap" && Transport.radioHP) {
       // classic EQ bass swap: the incoming enters with its lows cut (so the
-      // outgoing tail owns the low end), at a healthy level; ~2 bars in, the
-      // filter sweeps open ON A BEAT and the new bass drops
+      // outgoing tail owns the low end), at a healthy level; ONE BAR in, the
+      // filter sweeps open on a beat and the new bass drops
       const hp = Transport.radioHP.frequency;
       hp.cancelScheduledValues(t0);
-      hp.setValueAtTime(240, t0);
-      const swapAt = t0 + (this._swapDelay || 4);
-      hp.setValueAtTime(240, Math.max(t0, swapAt - 0.05));
-      hp.exponentialRampToValueAtTime(24, swapAt + 0.7);
-      g.setValueAtTime(vol * 0.25, t0);
+      hp.setValueAtTime(170, t0);
+      const swapAt = t0 + (this._swapDelay || 3);
+      hp.setValueAtTime(170, Math.max(t0, swapAt - 0.05));
+      hp.exponentialRampToValueAtTime(24, swapAt + 0.5);
+      g.setValueAtTime(vol * 0.35, t0);
       g.linearRampToValueAtTime(vol, t0 + this.FADEIN);
     } else if (style === "acapella") {
       // the incoming bed rises a touch faster under the riding vocal
@@ -1855,13 +1858,27 @@ const Radio = {
         }
         joinT = Math.max(0, target);
       }
-      // bass swap: sweep the lows open on a beat ~2 bars (8 beats) after entry
-      this._swapDelay = 4;
+      // bass swap: sweep the lows open on the downbeat ONE BAR (4 beats) in —
+      // short enough that the outgoing tail still owns the low end until then
+      this._swapDelay = 3;
       if (style === "bassswap" && nx._beats && nx._beats.length) {
         let i0 = nx._beats.findIndex(b => b >= joinT - 0.01);
         if (i0 < 0) i0 = nx._beats.length - 1;
-        const swapBeat = nx._beats[Math.min(i0 + 8, nx._beats.length - 1)];
-        this._swapDelay = Math.max(1.5, Math.min(8, (swapBeat - joinT) / rate));
+        const swapBeat = nx._beats[Math.min(i0 + 4, nx._beats.length - 1)];
+        this._swapDelay = Math.max(1.2, Math.min(3.5, (swapBeat - joinT) / rate));
+      }
+      // failsafe: whatever else happens, the low-cut may NEVER outlive the
+      // transition — if the filter is still closed later, force it open
+      const styleGen = this._styleGen = (this._styleGen || 0) + 1;
+      if (style === "bassswap") {
+        setTimeout(() => {
+          const hp = Transport.radioHP;
+          if (this._styleGen !== styleGen || !hp) return;
+          if (hp.frequency.value > 40) {
+            hp.frequency.cancelScheduledValues(Transport.ac.currentTime);
+            hp.frequency.value = 24;
+          }
+        }, (this._swapDelay + 3) * 1000);
       }
       Transport._rate = rate;                            // sources start tempo-matched
       Transport.seek(joinT);
@@ -2530,6 +2547,7 @@ const EQ = {
   FAX: [30, 17000],                    // frequency axis, Hz (log)
   MIDMIN: 250, MIDMAX: 6000,           // MID peak centre-frequency drag range
   LABEL_H: 20,                         // px reserved at the bottom for LOW/MID/HIGH
+  TOP_PAD: 26,                         // headroom so the spectrum/curve never touch the top edge
 
   setup() {
     window.addEventListener("resize", () => { if (this.on) this.resize(); });
@@ -2612,8 +2630,8 @@ const EQ = {
   // ---- geometry (all in CSS px; the canvas is scaled by DPR at draw time) --
   xForFreq(f, W) { const [a, z] = this.FAX; f = clamp(f, a, z); return Math.log(f / a) / Math.log(z / a) * W; },
   freqForX(x, W) { const [a, z] = this.FAX; return a * Math.pow(z / a, clamp(x / W, 0, 1)); },
-  yForDb(db, H) { const p = H - this.LABEL_H; return p * (1 - clamp((db - this.GMIN) / (this.GMAX - this.GMIN), 0, 1)); },
-  dbForY(y, H) { const p = H - this.LABEL_H; return this.GMIN + (1 - clamp(y / p, 0, 1)) * (this.GMAX - this.GMIN); },
+  yForDb(db, H) { const top = this.TOP_PAD, bot = H - this.LABEL_H; return bot - clamp((db - this.GMIN) / (this.GMAX - this.GMIN), 0, 1) * (bot - top); },
+  dbForY(y, H) { const top = this.TOP_PAD, bot = H - this.LABEL_H; return this.GMIN + clamp((bot - y) / (bot - top), 0, 1) * (this.GMAX - this.GMIN); },
   bright(c) { return c.map(v => Math.round(v + (255 - v) * 0.45)); },
 
   // approximate combined EQ response in dB (visual — the audio uses real biquads)
@@ -2704,20 +2722,41 @@ const EQ = {
     ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(0, y0); ctx.lineTo(W, y0); ctx.stroke();
 
-    // live spectrum bars (log-frequency, gamma-shaped for punch)
+    // live spectrum as a smooth, glowing filled area (log-frequency). Control
+    // points are neighbourhood-averaged across bins and eased frame-to-frame so
+    // the shape flows instead of reading as discrete blocks; capped at TOP_PAD.
     const an = Transport.analysers[lane.id];
+    const baseY = plotH, topY = this.TOP_PAD;
     if (an && Transport.ac) {
       an.getByteFrequencyData(lane.freq);
-      const bins = lane.freq.length, nyq = Transport.ac.sampleRate / 2, bw = 2;
-      for (let x = 0; x < W; x += bw) {
-        const f = this.freqForX(x + bw / 2, W);
-        const bin = clamp(Math.round(f / nyq * bins), 0, bins - 1);
-        const v = lane.freq[bin] / 255; if (v <= 0.01) continue;
-        const h = v * v * plotH;
-        const g = ctx.createLinearGradient(0, plotH, 0, plotH - h);
-        g.addColorStop(0, rgb(col, 0.18)); g.addColorStop(1, rgb(hot, 0.92));
-        ctx.fillStyle = g; ctx.fillRect(x, plotH - h, bw - 0.5, h);
+      const bins = lane.freq.length, nyq = Transport.ac.sampleRate / 2;
+      const N = clamp(Math.round(W / 6), 8, 200);
+      if (!lane.env || lane.env.length !== N + 1) lane.env = new Float32Array(N + 1);
+      const env = lane.env;
+      for (let i = 0; i <= N; i++) {
+        const f = this.freqForX(i / N * W, W), bc = f / nyq * bins;
+        let m = 0, cnt = 0;
+        for (let k = -2; k <= 2; k++) { const bi = Math.round(bc) + k; if (bi >= 0 && bi < bins) { m += lane.freq[bi]; cnt++; } }
+        const v = (cnt ? m / cnt : 0) / 255;
+        env[i] += (v - env[i]) * 0.35;                       // temporal easing
       }
+      const yOf = v => baseY - Math.pow(clamp(v, 0, 1), 1.5) * (baseY - topY);
+      const spectrumPath = () => {
+        ctx.moveTo(0, yOf(env[0]));
+        for (let i = 1; i <= N; i++) {
+          const x0 = (i - 1) / N * W, y0 = yOf(env[i - 1]), x1 = i / N * W, y1 = yOf(env[i]);
+          ctx.quadraticCurveTo(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
+        }
+        ctx.lineTo(W, yOf(env[N]));
+      };
+      ctx.beginPath(); ctx.moveTo(0, baseY); ctx.lineTo(0, yOf(env[0]));
+      spectrumPath(); ctx.lineTo(W, baseY); ctx.closePath();
+      const g = ctx.createLinearGradient(0, baseY, 0, topY);
+      g.addColorStop(0, rgb(col, 0.05)); g.addColorStop(0.55, rgb(col, 0.32)); g.addColorStop(1, rgb(hot, 0.7));
+      ctx.fillStyle = g; ctx.fill();
+      ctx.beginPath(); spectrumPath();                       // soft glowing crest
+      ctx.strokeStyle = rgb(hot, 0.5); ctx.lineWidth = 1.5; ctx.lineJoin = "round";
+      ctx.shadowColor = rgb(hot, 0.5); ctx.shadowBlur = 8; ctx.stroke(); ctx.shadowBlur = 0;
     }
 
     // EQ response curve
