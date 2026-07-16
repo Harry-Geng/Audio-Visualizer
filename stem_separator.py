@@ -19,6 +19,8 @@ def separate_stems(audio_path: str) -> dict[str, np.ndarray]:
 
     if wav.shape[0] == 1:
         wav = wav.repeat(2, 1)
+    elif wav.shape[0] > 2:            # 5.1 etc. — demucs expects 2 channels
+        wav = wav[:2]
 
     # Demucs expects normalized input
     ref = wav.mean(0)
@@ -27,6 +29,7 @@ def separate_stems(audio_path: str) -> dict[str, np.ndarray]:
 
     with torch.no_grad():
         sources = apply_model(model, wav.unsqueeze(0), progress=True)[0]
+    sources = sources * (std + 1e-8) + mean   # undo the normalization → true levels
 
     stems = {}
     for i, name in enumerate(model.sources):

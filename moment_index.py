@@ -55,10 +55,19 @@ def build_song_moments(song_id, stems_dir, features, out_dir=None, verbose=True)
     if kick is not None:
         stems["kick"] = kick
     stems = {k: v for k, v in stems.items() if v is not None}
+    # 6-stem songs keep guitar/piano OUTSIDE "other" — without them the mix (and
+    # emb_mix) would silently drop the lead instruments
+    extras = {}
+    for name in ("guitar", "piano"):
+        w = _load_mono(stems_dir, name)
+        if w is not None:
+            extras[name] = w
 
-    n = min(len(v) for v in stems.values())
+    n = min(len(v) for v in list(stems.values()) + list(extras.values()))
     stems = {k: v[:n] for k, v in stems.items()}
-    mix = sum(stems[s] for s in BASE_STEMS if s in stems).astype(np.float32)
+    extras = {k: v[:n] for k, v in extras.items()}
+    mix = (sum(stems[s] for s in BASE_STEMS if s in stems)
+           + sum(extras.values())).astype(np.float32)
 
     sa = StemAnalysis(stems)
     inter = np.stack([sa.moment_vector(m.start_t, m.end_t) for m in moments])
@@ -127,17 +136,30 @@ class MomentIndex:
     def add_file(self, npz_path):
         d = np.load(npz_path)
         song_id = os.path.basename(npz_path)[: -len("_moments.npz")]
+        start_row = len(self.rows)
         n = d["start_t"].shape[0]
         for i in range(n):
             self.rows.append((song_id, i, float(d["start_t"][i]), float(d["end_t"][i])))
         for key in d.files:
             if key in ("start_t", "end_t"):
                 continue
-            self._raw.setdefault(key, []).append(d[key])
+            self._raw.setdefault(key, []).append((start_row, d[key]))
 
     def finalize(self):
+        # facets are scattered into a full-height matrix by row offset: a song
+        # whose npz lacks a key (e.g. emb_vocals with no vocals stem) must NOT
+        # shift every later song's rows — that silently misaligns all queries.
+        total = len(self.rows)
         for name, parts in self._raw.items():
-            mat = np.concatenate(parts, axis=0).astype(np.float32)
+            dim = parts[0][1].shape[1]
+            mat = np.zeros((total, dim), np.float32)
+            covered = 0
+            for start, arr in parts:
+                mat[start:start + arr.shape[0]] = arr
+                covered += arr.shape[0]
+            if covered != total:
+                print(f"[moments] facet '{name}' missing for {total - covered} "
+                      f"moment(s) — zero-filled (those rows never match)")
             # embeddings: cosine via L2. handcrafted facets: z-score then L2.
             mat = _l2(mat) if name.startswith("emb_") else _l2(_zscore(mat))
             self.facets[name] = mat

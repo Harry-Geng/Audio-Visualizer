@@ -289,17 +289,22 @@ def _download_url(url, job, tmpdir):
         "format": "bestaudio/best",
         "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "flac"}],
-        "quiet": True, "no_warnings": True, "noprogress": True,
+        "quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True,
         "progress_hooks": [hook],
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
+    if info.get("entries"):                           # playlist URL → first entry's info
+        info = next((e for e in info["entries"] if e), info)
     title = info.get("title", "track")
     if info.get("uploader"):
         title = f"{info['uploader']} - {title}"
-    flac = os.path.join(tmpdir, f"{info['id']}.flac")
-    if not os.path.exists(flac):                      # fall back to whatever landed
-        cands = [f for f in os.listdir(tmpdir)]
+    flac = os.path.join(tmpdir, f"{info.get('id')}.flac")
+    if not os.path.exists(flac):                      # fall back to a produced audio file
+        cands = [f for f in os.listdir(tmpdir) if f.endswith(".flac")] \
+            or [f for f in os.listdir(tmpdir) if not f.endswith((".part", ".ytdl"))]
+        if not cands:
+            raise RuntimeError("download produced no audio file")
         flac = os.path.join(tmpdir, cands[0])
     return flac, title
 
@@ -374,7 +379,8 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False, six_stem
                 _set(job, "separating", "splitting drum kit (DrumSep)…")
                 try:
                     drums_path = os.path.join(tmpdir, "_drums.wav")
-                    sf.write(drums_path, stems_hq["drums"], sr_hq)
+                    # float WAV: PCM_16 would clip >±1 peaks before DrumSep sees them
+                    sf.write(drums_path, stems_hq["drums"], sr_hq, subtype="FLOAT")
                     parts, p_sr = _separate_drums(drums_path, tmpdir)
                     for name, arr in parts.items():
                         if p_sr != sr_hq:
@@ -384,6 +390,22 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False, six_stem
                     print(f"  DrumSep failed, keeping band-split kit: {e}")
                     use_drumsep = False
                 job.progress = 86
+
+            # Separation outputs routinely overshoot ±1.0; FLAC PCM_16 would
+            # hard-clip them on write. Rescale ALL stems (and kit parts) by one
+            # shared factor so relative levels — and mix reconstruction — hold.
+            peak = max([np.abs(a).max() for a in stems_hq.values()]
+                       + [np.abs(a).max() for a in drum_parts.values()] + [1.0])
+            if peak > 1.0:
+                g = 0.999 / peak
+                stems_hq = {k: v * g for k, v in stems_hq.items()}
+                drum_parts = {k: v * g for k, v in drum_parts.items()}
+
+            # trim everything to one common length BEFORE writing, so the files
+            # on disk match the features/meta computed from them
+            n_hq = min(len(a) for a in list(stems_hq.values()) + list(drum_parts.values()))
+            stems_hq = {k: v[:n_hq] for k, v in stems_hq.items()}
+            drum_parts = {k: v[:n_hq] for k, v in drum_parts.items()}
 
             hq_dir = os.path.join(LIBRARY_DIR, f"{song_id}_stems_hq")
             an_dir = os.path.join(LIBRARY_DIR, f"{song_id}_stems")
@@ -457,6 +479,17 @@ def _run(job, src_path=None, url=None, hq_vocals=False, drum_kit=False, six_stem
         job.error = str(e)
         _set(job, "error", f"failed: {e}")
         traceback.print_exc()
+        # remove half-written library artifacts unless the song reached the
+        # features stage — a stems dir without features looks "done" to skip
+        # checks yet renders broken, and blocks re-ingest under the same id
+        sid = getattr(job, "song_id", None)
+        if sid and not os.path.exists(os.path.join(LIBRARY_DIR, f"{sid}_features.json")):
+            for p in (f"{sid}_stems", f"{sid}_stems_hq"):
+                shutil.rmtree(os.path.join(LIBRARY_DIR, p), ignore_errors=True)
+            try:
+                os.remove(os.path.join(LIBRARY_DIR, f"{sid}.flac"))
+            except OSError:
+                pass
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

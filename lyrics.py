@@ -50,16 +50,26 @@ def clean_query(artist, track):
     return artist, track
 
 
+class LyricsUnavailable(Exception):
+    """Transient LRCLIB failure (network/5xx/429). Callers must NOT persist a
+    'none' result for this — the song may well have lyrics; retry later."""
+
+
 def fetch_lrclib(artist, track, duration=None):
-    """Best LRCLIB match (prefers synced lyrics, then closest duration), or None."""
+    """Best LRCLIB match (prefers synced lyrics, then closest duration), or None
+    when LRCLIB definitively has no match. Raises LyricsUnavailable when the
+    service couldn't be asked (so 'no lyrics' is never cached off a blip)."""
     try:
         r = requests.get(f"{LRCLIB}/search",
                          params={"artist_name": artist, "track_name": track}, timeout=20)
-    except Exception:
-        return None
+    except Exception as e:
+        raise LyricsUnavailable(f"lrclib unreachable: {e}") from e
     if not r.ok:
-        return None
-    hits = r.json() or []
+        raise LyricsUnavailable(f"lrclib http {r.status_code}")
+    try:
+        hits = r.json() or []
+    except ValueError as e:
+        raise LyricsUnavailable(f"lrclib bad payload: {e}") from e
     synced = [h for h in hits if h.get("syncedLyrics")]
     pool = synced or hits
     if not pool:

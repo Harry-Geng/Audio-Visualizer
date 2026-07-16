@@ -165,10 +165,28 @@ async function refreshSongs(selectId) {
   if (selectId) loadSong(selectId);
 }
 
+let _loadGen = 0;        // overlapping loads: only the newest response may land
+let _lastGoodSong = null;
+
 async function loadSong(id) {
+  const gen = ++_loadGen;
   S.songId = id;
   Radio._joinT = null;              // radio re-sets it right after when it drove the switch
-  S.meta = await fetch("/api/song?id=" + encodeURIComponent(id)).then(r => r.json());
+  if (!Radio._advancing) Radio.cancelFade();   // manual switch mid-fade: drop timer + ramp
+  let meta = null;
+  try {
+    const r = await fetch("/api/song?id=" + encodeURIComponent(id));
+    meta = r.ok ? await r.json() : null;
+  } catch {}
+  if (gen !== _loadGen) return;                // superseded by a newer switch
+  if (!meta || meta.error || !meta.tracks) {   // 404 / stale id → keep the old song intact
+    console.warn("song failed to load:", id);
+    S.songId = _lastGoodSong;
+    if (_lastGoodSong) els.song.value = _lastGoodSong;
+    return;
+  }
+  _lastGoodSong = id;
+  S.meta = meta;
   document.title = `${id} — Microscope`;
 
   const f = S.meta.features || {};
@@ -191,6 +209,9 @@ async function loadSong(id) {
   applyVisibility();
   setView(0, S.meta.duration);
   if (Lyrics.visible) Lyrics.load(id); else Lyrics.data = null;
+  // scene may have (re)built during the meta fetch using the OLD song's meta
+  // while stamping the NEW id — invalidate so it rebuilds from this meta
+  if (typeof Scene !== "undefined") Scene.builtFor = null;
 }
 
 // groups (parent stems) that actually have sub-components in this song
@@ -599,6 +620,7 @@ function setupInteractions() {
       return;
     }
     if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+    if (!S.meta) return;                      // empty library / first song still loading
     if (e.code === "Space") { e.preventDefault(); Transport.toggle(); }
     else if (e.key === "f") setView(0, S.meta.duration);
     else if (e.key === "=" || e.key === "+") zoomBy(0.5);
@@ -663,10 +685,13 @@ const Lyrics = {
     this.flow.classList.add("loading"); this.flow.innerHTML = "";
     this.elTitle.textContent = els.song.selectedOptions[0]?.textContent || "";
     this._applyTheme(songId);
+    let data = null;
     try {
       const r = await fetch("/api/lyrics?id=" + encodeURIComponent(songId));
-      this.data = r.ok ? await r.json() : null;
-    } catch { this.data = null; }
+      data = r.ok ? await r.json() : null;
+    } catch {}
+    if (S.songId !== songId) return;   // song changed mid-fetch → a newer load owns the panel
+    this.data = data;
     this.render(songId);
   },
 
@@ -812,7 +837,7 @@ const TBar = {
 // any result, which loads that song and plays from the matching moment.
 // ==========================================================================
 const Similar = {
-  visible: false, facet: "mix", _poll: null,
+  visible: false, facet: "mix", _poll: null, _req: 0,
   _prev: null, _prevBtn: null, _prevCard: null,   // inline preview player state
 
   toggle() {
@@ -826,15 +851,19 @@ const Similar = {
 
   async find() {
     if (!this.visible) return;
+    clearTimeout(this._poll);                     // a live 202 poll must not outrun us
+    const req = ++this._req;                      // stale responses may not render
     if (!S.songId || !S.meta) { els.simResults.innerHTML = `<div class="sim-empty">load a song first</div>`; return; }
     const t = Transport.curTime();
     els.simSeed.innerHTML = `matching <b>${escapeHtml(els.song.selectedOptions[0]?.textContent || S.songId)}</b> @ ${lsTime(t)}`;
     els.simResults.innerHTML = `<div class="sim-empty">searching…</div>`;
     const url = `/api/similar?id=${encodeURIComponent(S.songId)}&t=${t.toFixed(2)}&facet=${this.facet}&k=16`;
     let r;
-    try { r = await fetch(url); } catch { els.simResults.innerHTML = `<div class="sim-empty">request failed</div>`; return; }
+    try { r = await fetch(url); } catch { if (req === this._req) els.simResults.innerHTML = `<div class="sim-empty">request failed</div>`; return; }
+    if (req !== this._req || !this.visible) return;   // superseded while fetching
     if (r.status === 202) {                       // index still building → poll
       const s = await r.json().catch(() => ({}));
+      if (req !== this._req) return;
       const pct = s.total ? Math.round((s.loaded / s.total) * 100) : 0;
       els.simResults.innerHTML = `<div class="sim-empty">building similarity index… ${pct}% (${s.loaded || 0}/${s.total || 0})</div>`;
       clearTimeout(this._poll);
@@ -842,6 +871,7 @@ const Similar = {
       return;
     }
     const d = await r.json().catch(() => null);
+    if (req !== this._req) return;
     if (!d || d.error) { els.simResults.innerHTML = `<div class="sim-empty">${d ? escapeHtml(d.error) : "error"}</div>`; return; }
     this.render(d);
   },
@@ -876,17 +906,26 @@ const Similar = {
     const qt = els.simQ.value.trim();
     if (!qt) return;
     clearTimeout(this._poll);
+    const req = ++this._req;
     els.simSeed.innerHTML = `searching for <b>“${escapeHtml(qt)}”</b>`;
     els.simResults.innerHTML = `<div class="sim-empty">searching…</div>`;
     let r;
     try { r = await fetch(`/api/textsearch?q=${encodeURIComponent(qt)}&k=24`); }
     catch { els.simResults.innerHTML = `<div class="sim-empty">request failed</div>`; return; }
+    if (req !== this._req) return;                // superseded while fetching
     if (r.status === 202) {                       // audio index still loading
+      const s = await r.json().catch(() => ({}));
+      if (req !== this._req) return;
+      if (s.status === "empty" || s.status === "error") {   // terminal: no index exists
+        els.simResults.innerHTML = `<div class="sim-empty">no sound index yet — run backfill_clap.py</div>`;
+        return;
+      }
       els.simResults.innerHTML = `<div class="sim-empty">building sound index…</div>`;
       this._poll = setTimeout(() => this.textSearch(), 2000);
       return;
     }
     const d = await r.json().catch(() => null);
+    if (req !== this._req) return;
     if (!d || d.error) { els.simResults.innerHTML = `<div class="sim-empty">${d ? escapeHtml(d.error) : "error"}</div>`; return; }
     const cov = d.coverage || {};
     els.simSeed.innerHTML = `<b>“${escapeHtml(qt)}”</b> · searched ${cov.songs || 0}/${cov.total || "?"} songs`;
@@ -904,7 +943,9 @@ const Similar = {
             `&start=${res.start_t.toFixed(2)}&end=${(res.end_t + 2).toFixed(2)}`;
     a.volume = Math.min(1, Transport.masterVol);
     a.onended = () => this.stopPreview();
-    a.play().catch(() => this.stopPreview());
+    // pause() rejects the PREVIOUS play() promise asynchronously — only tear
+    // down if this preview is still the active one when the rejection lands
+    a.play().catch(() => { if (this._prevBtn === btn) this.stopPreview(); });
     btn.textContent = "■"; card.classList.add("previewing");
     this._prevBtn = btn; this._prevCard = card;
   },
@@ -1200,6 +1241,7 @@ const Radio = {
   FADE: 5, FADEIN: 3,                    // seconds: outro fade-out / entry fade-in
   _fading: false, _fadeT: null, _fadeInPending: false,
   _joinT: null, _nextBuf: null, _nextBufFor: null,
+  _pickP: null, _lastPickAt: 0, _iv: null,
 
   toggle() {
     this.on = !this.on;
@@ -1207,8 +1249,27 @@ const Radio = {
     els.tbarNext.hidden = !this.on;
     this._next = null;
     this.showNext();
-    if (!this.on) this.cancelFade();
-    if (this.on && S.songId) this.pick();
+    clearInterval(this._iv);
+    if (this.on) {
+      // rAF stops in background tabs — this interval keeps the radio advancing
+      this._iv = setInterval(() => this.checkTick(), 1000);
+      if (S.songId) this.pick(true);
+    } else {
+      this.cancelFade();
+      this._nextBuf = null; this._nextBufFor = null;   // release the predecoded buffer
+    }
+  },
+
+  // all radio decisions live here; called every rAF tick AND from a 1 s
+  // interval so the radio still advances when the tab is backgrounded.
+  checkTick(t) {
+    if (!this.on || !S.meta || !Transport.playing) return;
+    if (t == null) t = Transport.curTime();
+    const left = S.meta.duration - t;
+    if (!this._next && left < 20) this.pick();
+    if (!this._fading && left <= this.FADE + 0.5) this.beginExit();
+    else if (this._fading && left > this.FADE + 3) this.cancelFade();  // scrubbed back
+    if (t >= S.meta.duration - 0.02) this.advance();
   },
 
   // start easing the outro down; when it bottoms out, flow into the next track.
@@ -1250,33 +1311,45 @@ const Radio = {
     return true;
   },
 
-  async pick() {
-    if (this._picking || !S.meta || !S.songId) return;
+  // latched: concurrent callers share the in-flight attempt, so advance()'s
+  // await gets the real result instead of a no-op. `force` skips the throttle.
+  pick(force) {
+    if (this._picking) return this._pickP;
+    if (!S.meta || !S.songId) return Promise.resolve();
+    if (!force && Date.now() - this._lastPickAt < 2500) return Promise.resolve();
     this._picking = true;
+    this._pickP = this._doPick()
+      .finally(() => { this._picking = false; this._lastPickAt = Date.now(); });
+    return this._pickP;
+  },
+
+  async _doPick() {
+    const t = Math.max(0, S.meta.duration - 15);       // seed from the outro
+    let cand = null;
     try {
-      const t = Math.max(0, S.meta.duration - 15);       // seed from the outro
-      let cand = null;
-      try {
-        const r = await fetch(`/api/similar?id=${encodeURIComponent(S.songId)}` +
-                              `&t=${t.toFixed(2)}&facet=${Similar.facet}&k=12`);
-        if (r.ok) {
-          const d = await r.json();
-          const seen = new Set([S.songId, ...this.history]);
-          const fresh = (d.results || []).filter(x => !seen.has(x.song_id));
-          // prefer joining somewhere that leaves plenty of song left to play
-          cand = fresh.find(x => (x.start_t || 0) <= 180) || fresh[0] || null;
-        }
-      } catch {}
-      if (!cand) {                                       // index building / unknown song
-        const opts = [...els.song.options].map(o => o.value)
-          .filter(v => v !== S.songId && !this.history.includes(v));
-        const id = opts[Math.floor(Math.random() * opts.length)];
-        if (id) cand = { song_id: id, start_t: 0, score: 0 };
+      const r = await fetch(`/api/similar?id=${encodeURIComponent(S.songId)}` +
+                            `&t=${t.toFixed(2)}&facet=${Similar.facet}&k=12`);
+      if (r.ok) {
+        const d = await r.json();
+        const seen = new Set([S.songId, ...this.history]);
+        const fresh = (d.results || []).filter(x => !seen.has(x.song_id));
+        // prefer joining somewhere that leaves plenty of song left to play
+        cand = fresh.find(x => (x.start_t || 0) <= 180) || fresh[0] || null;
       }
-      this._next = cand;
-      this.showNext();
-      if (cand) this.predecode(cand.song_id);   // decode now → gapless switch later
-    } finally { this._picking = false; }
+    } catch {}
+    if (!cand) {                                       // index building / unknown song
+      const opts = [...els.song.options].map(o => o.value)
+        .filter(v => v !== S.songId && !this.history.includes(v));
+      const id = opts[Math.floor(Math.random() * opts.length)];
+      if (id) cand = { song_id: id, start_t: 0, score: 0 };
+    }
+    if (!cand) {              // tiny library: everything is in history — recycle it
+      const recycled = this.history.find(h => h !== S.songId);
+      if (recycled) cand = { song_id: recycled, start_t: 0, score: 0 };
+    }
+    this._next = cand;
+    this.showNext();
+    if (cand && this.on) this.predecode(cand.song_id);   // decode now → gapless switch
   },
 
   // fetch + decode the next song's full mix during the outro, so the switch
@@ -1302,7 +1375,7 @@ const Radio = {
     this._advancing = true;
     clearTimeout(this._fadeT);
     try {
-      if (!this._next) await this.pick();
+      if (!this._next) await this.pick(true);
       const nx = this._next;
       this._next = null;
       if (!nx) { Transport.pause(); return; }
@@ -1311,6 +1384,10 @@ const Radio = {
       this._fadeInPending = true;                        // ease the entry in
       els.song.value = nx.song_id;
       await loadSong(nx.song_id);
+      if (S.songId !== nx.song_id) {                     // stale id — load refused it
+        this._fadeInPending = false;
+        return;
+      }
       if (this._nextBuf && this._nextBufFor === nx.song_id)
         Transport.buffers.set("full", this._nextBuf);    // pre-decoded: no decode gap
       this._nextBuf = null; this._nextBufFor = null;
@@ -1319,7 +1396,7 @@ const Radio = {
       this._joinT = joinT;                               // ⟟ marker in the seek bar
       if (!Transport.playing) await Transport.toggle();
       this.showNext();
-      this.pick();                                       // queue the following one
+      if (this.on) this.pick();                          // queue the following one
     } finally { this._advancing = false; this._fading = false; }
   },
 };
@@ -1352,6 +1429,7 @@ const Transport = {
   },
   reset() {
     this.stopSources(); this.playing = false; this.offset = 0;
+    this._bufGen = (this._bufGen || 0) + 1;   // in-flight decodes may not repopulate
     this.buffers.clear(); this.loading.clear();
     els.play.textContent = "▶ play"; els.play.classList.remove("on");
   },
@@ -1412,9 +1490,16 @@ const Transport = {
   async load(id) {
     if (this.buffers.has(id)) return this.buffers.get(id);
     if (this.loading.has(id)) return this.loading.get(id);
-    const p = fetch(this.url(id)).then(r => r.arrayBuffer())
+    const gen = this._bufGen || 0;      // decode outlives loadSong's reset(): a
+    const p = fetch(this.url(id))       // stale song's audio must not enter the cache
+      .then(r => { if (!r.ok) throw new Error("audio http " + r.status); return r.arrayBuffer(); })
       .then(ab => this.ac.decodeAudioData(ab))
-      .then(buf => { this.buffers.set(id, buf); this.loading.delete(id); return buf; });
+      .then(buf => {
+        if ((this._bufGen || 0) === gen) this.buffers.set(id, buf);
+        if (this.loading.get(id) === p) this.loading.delete(id);
+        return buf;
+      });
+    p.catch(() => { if (this.loading.get(id) === p) this.loading.delete(id); });
     this.loading.set(id, p); return p;
   },
 
@@ -1463,7 +1548,9 @@ const Transport = {
         if (pos < buf.duration) { src.start(0, pos); this.sources.push(src); }
         started.add(id);
       };
-      const bufs = await Promise.all(audibleIds.map(id => this.load(id)));
+      let bufs;
+      try { bufs = await Promise.all(audibleIds.map(id => this.load(id))); }
+      catch { if (gen === this._gen) { this._starting = false; this.pause(); } return; }
       if (gen !== this._gen || !this.playing) return;   // superseded while decoding
       this.startedAt = this.ac.currentTime; this._starting = false;   // anchor clock to real audio start
       if (!(typeof Radio !== "undefined" && Radio.consumeFadeIn()))
@@ -1485,7 +1572,9 @@ const Transport = {
     }
 
     const ids = this.resolve().play; this.activeKey = ids.join(",");
-    const bufs = await Promise.all(ids.map(id => this.load(id)));
+    let bufs;
+    try { bufs = await Promise.all(ids.map(id => this.load(id))); }
+    catch { if (gen === this._gen) { this._starting = false; this.pause(); } return; }
     if (gen !== this._gen || !this.playing) return;   // superseded while decoding
     this.startedAt = this.ac.currentTime; this._starting = false;   // anchor clock to real audio start
     this.gainNodes = {};
@@ -1578,7 +1667,11 @@ const Transport = {
     Similar.stopPreview();               // don't overlap side-channel previews
     Galaxy.stopPreview();
     if (this.ac.state === "suspended") await this.ac.resume();
-    this.offset = this.curTime(); this.startedAt = this.ac.currentTime; this.playing = true;
+    this.offset = this.curTime();
+    // at the very end, play restarts the song — otherwise tick's end-of-song
+    // check re-pauses on the next frame and the button appears dead
+    if (S.meta && this.offset >= S.meta.duration - 0.05) this.offset = 0;
+    this.startedAt = this.ac.currentTime; this.playing = true;
     els.play.textContent = "❚❚ pause"; els.play.classList.add("on");
     await this.startSources();
   },
@@ -1611,13 +1704,8 @@ const Transport = {
       TBar.update(this.curTime());
       if (this.playing) {
         const t = this.curTime(), span = S.view.end - S.view.start;
-        if (Radio.on) {
-          const left = S.meta.duration - t;
-          if (!Radio._next && left < 20) Radio.pick();
-          if (!Radio._fading && left <= Radio.FADE + 0.5) Radio.beginExit();
-          else if (Radio._fading && left > Radio.FADE + 3) Radio.cancelFade();  // scrubbed back
-        }
-        if (t >= S.meta.duration - 0.02) { if (Radio.on) Radio.advance(); else this.pause(); }
+        Radio.checkTick(t);
+        if (t >= S.meta.duration - 0.02 && !Radio.on) this.pause();
         else if (S.lock)                                  // scroll lock: keep centered
           setView(t - span / 2, t + span / 2);
         else if (span < S.meta.duration * 0.9 && (t > S.view.end - span * 0.08 || t < S.view.start))
@@ -1708,9 +1796,20 @@ const Ingest = {
     el.querySelector(".t").textContent = label;
     els.jobs.appendChild(el);
     const bar = el.querySelector(".bar"), fill = el.querySelector(".bar i");
+    let misses = 0;
     const poll = async () => {
-      const j = await fetch("/api/job?id=" + job.id).then(r => r.json()).catch(() => null);
-      if (!j) return setTimeout(poll, 1200);
+      const j = await fetch("/api/job?id=" + job.id)
+        .then(r => r.ok ? r.json() : null).catch(() => null);
+      if (!j || j.error) {                 // server restarted / job unknown → give up
+        if (++misses >= 5) {
+          el.classList.add("error");
+          el.querySelector(".m").textContent = "✕ lost contact with the server";
+          setTimeout(() => el.remove(), 9000);
+          return;
+        }
+        return setTimeout(poll, 1500);
+      }
+      misses = 0;
       const pct = j.progress || 0;
       el.querySelector(".m").textContent = `${j.message || j.stage} · ${pct}%`;
       if (pct > 0) { bar.classList.add("determinate"); fill.style.width = pct + "%"; }

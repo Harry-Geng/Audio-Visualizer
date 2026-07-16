@@ -49,14 +49,14 @@ def _analysis_stems(stems_dir):
 
 def _prior_flags(song_id):
     """Reuse the tier flags from an existing features.json if one is present."""
-    slug = song_id.lower().replace(" ", "_")
-    p = os.path.join(LIBRARY_DIR, f"{slug}_features.json")
-    if os.path.exists(p):
-        try:
-            m = json.load(open(p, encoding="utf-8")).get("meta", {})
-            return {k: m.get(k) for k in ("lossy_source", "hq_vocals", "drum_kit", "six_stem")}
-        except Exception:
-            pass
+    for name in (song_id, song_id.lower().replace(" ", "_")):   # verbatim, then legacy slug
+        p = os.path.join(LIBRARY_DIR, f"{name}_features.json")
+        if os.path.exists(p):
+            try:
+                m = json.load(open(p, encoding="utf-8")).get("meta", {})
+                return {k: m.get(k) for k in ("lossy_source", "hq_vocals", "drum_kit", "six_stem")}
+            except Exception:
+                pass
     return {}
 
 

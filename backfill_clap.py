@@ -118,7 +118,11 @@ def _todo(force=False):
     for f in sorted(glob.glob(os.path.join(LIBRARY_DIR, "*_moments.npz"))):
         sid = os.path.basename(f)[: -len("_moments.npz")]
         sdir = os.path.join(LIBRARY_DIR, sid + "_stems")
-        n = np.load(f)["start_t"].shape[0]
+        try:
+            n = np.load(f)["start_t"].shape[0]
+        except Exception as ex:      # corrupt moments npz → skip, don't kill the scan
+            print(f"[clap] skipping {sid}: unreadable moments file ({ex})")
+            continue
         outp = os.path.join(LIBRARY_DIR, f"{sid}_clap.npz")
         if not force and os.path.exists(outp):
             try:

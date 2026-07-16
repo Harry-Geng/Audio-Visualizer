@@ -46,18 +46,17 @@ const Scene = {
   },
   // which instruments should be AUDIBLE: "FULL" (play the original) unless the
   // user is soloing/muting, in which case the relevant stems play instead.
+  // Derived from Transport.resolve() so depth-1 solo/mute (kit pieces, bass
+  // registers) behaves the same here as in the stem view.
   audibleSet() {
-    const base = S.rows.filter(r => r.track.depth === 0 && r.track.id !== "mix");
-    const solo = base.filter(r => r.solo).map(r => r.track.id);
-    const mute = new Set(base.filter(r => r.mute).map(r => r.track.id));
-    let chosen;
-    if (solo.length) chosen = base.filter(r => solo.includes(r.track.id));
-    else if (mute.size) chosen = base.filter(r => !mute.has(r.track.id));
-    else return "FULL";
+    const res = Transport.resolve();
+    if (res.play.length === 1 && res.play[0] === "full") return "FULL";
     const set = new Set();
-    for (const r of chosen) {
-      if (r.track.id === "drums") { const p = this.drumParts(); (p.length ? p : ["drums"]).forEach(x => set.add(x)); }
-      else set.add(r.track.id);
+    for (const id of res.play) {
+      const t = (S.meta && S.meta.tracks || []).find(x => x.id === id);
+      if (id === "drums") { const p = this.drumParts(); (p.length ? p : ["drums"]).forEach(x => set.add(x)); }
+      else if (t && t.depth === 1 && t.group !== "drums") set.add(t.group);  // registers: nearest audible unit
+      else set.add(id);
     }
     return set;
   },
@@ -112,7 +111,9 @@ const Scene = {
 
   resize() {
     this.dpr = window.devicePixelRatio || 1;
-    const r = this.canvas.getBoundingClientRect();
+    // measure the container, not the 2D canvas: mandala mode leaves the canvas
+    // display:none, whose rect is 0×0 — sizing from it collapses every view to 1px
+    const r = this.hud.getBoundingClientRect();
     this.W = Math.max(1, Math.round(r.width));
     this.H = Math.max(1, Math.round(r.height));
     this.canvas.width = Math.round(this.W * this.dpr);
@@ -243,9 +244,19 @@ const Scene = {
     const parts = this.drumParts();
     for (const o of this.insts) {
       let lv;
-      if (o.id === "drums" && parts.length) { lv = 0; for (const p of parts) lv = Math.max(lv, Transport.level(p)); }
-      else lv = Transport.level(o.id);
-      o.bands = Transport.bands(o.id);
+      if (o.id === "drums" && parts.length) {
+        lv = 0;
+        const bb = [0, 0, 0];       // kit songs have no 'drums' analyser — aggregate pieces
+        for (const p of parts) {
+          lv = Math.max(lv, Transport.level(p));
+          const pb = Transport.bands(p);
+          for (let i = 0; i < 3; i++) bb[i] = Math.max(bb[i], pb[i]);
+        }
+        o.bands = bb;
+      } else {
+        lv = Transport.level(o.id);
+        o.bands = Transport.bands(o.id);
+      }
       o.smooth = o.smooth * 0.7 + lv * 0.3;
       o.onset = Math.max(0, lv - o.prev - 0.04);
       o.prev = o.prev * 0.6 + lv * 0.4;

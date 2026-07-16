@@ -51,8 +51,7 @@ def _missing_titles():
                 seen[r["title"]] = r
     out = []
     for title, r in seen.items():
-        slug = ingest._base_slug(title)
-        if os.path.isdir(os.path.join(LIBRARY_DIR, slug + "_stems")):
+        if bs._song_complete(title):                     # all 4 stems present
             continue                                     # already recovered
         dur = r.get("duration_s") or r.get("yt_duration") or 0.0
         out.append((title, r.get("spotify_id"), dur))
@@ -124,6 +123,7 @@ def main():
                                "status": "error", "error": "retry: " + " | ".join(errs[:4])})
                 continue
 
+            bs._clear_partial(title)     # repair in place, don't dedupe to (2)
             job = ingest.process_file_sync(flac, title, hq_vocals=True,
                                            drum_kit=True, lossy=True)
             rec = {"title": title, "spotify_id": spotify_id, "song_id": job.song_id, **meta}

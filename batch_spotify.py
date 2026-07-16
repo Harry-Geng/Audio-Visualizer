@@ -66,8 +66,26 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-from config import LIBRARY_DIR
+from config import LIBRARY_DIR, STEM_NAMES, stem_file
 import ingest
+
+
+def _song_complete(title):
+    """True when the song's stems dir holds all 4 base stems. A bare isdir()
+    check would treat a dir left by a mid-write crash as 'done' forever."""
+    stems_dir = os.path.join(LIBRARY_DIR, f"{ingest._base_slug(title)}_stems")
+    return all(stem_file(stems_dir, s) for s in STEM_NAMES)
+
+
+def _clear_partial(title):
+    """Remove an incomplete song's stem dirs so re-processing repairs it in
+    place instead of _slugify_id deduping it into '<title> (2)'."""
+    slug = ingest._base_slug(title)
+    for suffix in ("_stems", "_stems_hq"):
+        d = os.path.join(LIBRARY_DIR, slug + suffix)
+        if os.path.isdir(d):
+            print(f"    ! clearing partial {os.path.basename(d)} (incomplete stems)")
+            shutil.rmtree(d, ignore_errors=True)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(LIBRARY_DIR, "batch_log.jsonl")
@@ -451,9 +469,7 @@ def main():
 
     if args.dry_run:
         for i, t in enumerate(tracks, 1):
-            slug = ingest._base_slug(t["title"])
-            done = os.path.isdir(os.path.join(LIBRARY_DIR, f"{slug}_stems"))
-            mark = "[done]" if done else "      "
+            mark = "[done]" if _song_complete(t["title"]) else "      "
             print(f"  {i:3d}. {mark} {t['title']}  ({_fmt_dur(t['duration_s'])})")
         return
 
@@ -478,8 +494,7 @@ def main():
                 break
             if args.limit and queued >= args.limit:
                 break
-            slug = ingest._base_slug(tr["title"])
-            if os.path.isdir(os.path.join(LIBRARY_DIR, f"{slug}_stems")):
+            if _song_complete(tr["title"]):
                 continue                                   # already done → skip silently
             queued += 1
             tmpdir = tempfile.mkdtemp(prefix="batch_")
@@ -495,7 +510,11 @@ def main():
                     continue
             else:
                 shutil.rmtree(tmpdir, ignore_errors=True); return
-        dlq.put(None)                                      # sentinel: no more songs
+        while not stop_evt.is_set():                       # sentinel: no more songs
+            try:
+                dlq.put(None, timeout=1.0); break
+            except queue.Full:
+                continue
 
     prod = threading.Thread(target=producer, name="downloader", daemon=True)
     prod.start()
@@ -519,12 +538,14 @@ def main():
                 e = item[3]
                 print(f"    FAILED (download): {e}")
                 log_result({"title": tr["title"], "spotify_id": tr["spotify_id"],
+                            "duration_s": tr["duration_s"],   # lets retry_missing duration-rank
                             "status": "error", "error": str(e),
                             "elapsed_s": round(time.time() - t0, 1)})
                 shutil.rmtree(item[4], ignore_errors=True)
                 continue
 
             _, _, _, flac, meta, tmpdir = item
+            _clear_partial(tr["title"])       # repair in place, don't dedupe to (2)
             if meta.get("duration_mismatch"):
                 print(f"    ! duration mismatch: yt={_fmt_dur(meta['yt_duration'])} "
                       f"vs spotify={_fmt_dur(tr['duration_s'])} — '{meta['yt_title']}'")
@@ -548,6 +569,7 @@ def main():
                 print(f"    FAILED (pipeline): {e}")
                 traceback.print_exc()
                 log_result({"title": tr["title"], "spotify_id": tr["spotify_id"],
+                            "duration_s": tr["duration_s"],
                             "status": "error", "error": str(e),
                             "elapsed_s": round(time.time() - t0, 1)})
             finally:
@@ -560,7 +582,8 @@ def main():
         print("\n[batch] interrupted by user.")
     finally:
         stop_evt.set()
-        try:                                               # clean up prefetched temp dirs
+        prod.join(timeout=8)      # let an in-flight dlq.put land BEFORE draining,
+        try:                      # or its temp dir would slip past the cleanup
             while True:
                 left = dlq.get_nowait()
                 if left:

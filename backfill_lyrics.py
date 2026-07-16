@@ -43,12 +43,13 @@ def _batchlog_titles():
 
 
 def _features_duration(song_id):
-    p = os.path.join(LIBRARY_DIR, song_id.lower().replace(" ", "_") + "_features.json")
-    if os.path.exists(p):
-        try:
-            return json.load(open(p, encoding="utf-8")).get("meta", {}).get("duration_seconds")
-        except Exception:
-            pass
+    for name in (song_id, song_id.lower().replace(" ", "_")):   # verbatim, then legacy slug
+        p = os.path.join(LIBRARY_DIR, name + "_features.json")
+        if os.path.exists(p):
+            try:
+                return json.load(open(p, encoding="utf-8")).get("meta", {}).get("duration_seconds")
+            except Exception:
+                pass
     return None
 
 

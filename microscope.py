@@ -96,9 +96,11 @@ def discover_songs():
 
 
 def _features_path(song_id):
-    slug = song_id.lower().replace(" ", "_")
-    p = os.path.join(LIBRARY_DIR, f"{slug}_features.json")
-    return p if os.path.exists(p) else None
+    for name in (song_id, song_id.lower().replace(" ", "_")):   # verbatim, then legacy slug
+        p = os.path.join(LIBRARY_DIR, f"{name}_features.json")
+        if os.path.exists(p):
+            return p
+    return None
 
 
 # original (full-quality) source files, preferred for playback over the
@@ -129,6 +131,7 @@ class Song:
         self.n_samples = 0
         self._mix_wav_bytes = None
         self._play_wav = None
+        self._wav_lock = threading.Lock()   # serialize wav-cache builds
         self.orig_path = _original_path(song_id)
         self._lock = threading.Lock()
         self._loaded = False
@@ -314,42 +317,59 @@ class Song:
         """Full-quality playback audio. Prefers the original source file
         (stereo, native sample rate); falls back to the mono 22 kHz mix."""
         self.load()
-        if self._play_wav is not None:
+        with self._wav_lock:     # concurrent requests → decode once, not twice
+            if self._play_wav is not None:
+                return self._play_wav
+
+            if self.orig_path:
+                y, sr = sf.read(self.orig_path, dtype="float32", always_2d=True)
+                channels = y.shape[1]
+            else:
+                mono = self.tracks["mix"]
+                peak = np.abs(mono).max() + 1e-9
+                y = (mono / peak * 0.97).reshape(-1, 1)
+                sr, channels = self.sr, 1
+
+            pcm16 = (np.clip(y, -1, 1) * 32767).astype("<i2")
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                w.setnchannels(channels)
+                w.setsampwidth(2)
+                w.setframerate(int(sr))
+                w.writeframes(pcm16.tobytes())
+            self._play_wav = buf.getvalue()
             return self._play_wav
-
-        if self.orig_path:
-            y, sr = sf.read(self.orig_path, dtype="float32", always_2d=True)
-            channels = y.shape[1]
-        else:
-            mono = self.tracks["mix"]
-            peak = np.abs(mono).max() + 1e-9
-            y = (mono / peak * 0.97).reshape(-1, 1)
-            sr, channels = self.sr, 1
-
-        pcm16 = (np.clip(y, -1, 1) * 32767).astype("<i2")
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as w:
-            w.setnchannels(channels)
-            w.setsampwidth(2)
-            w.setframerate(int(sr))
-            w.writeframes(pcm16.tobytes())
-        self._play_wav = buf.getvalue()
-        return self._play_wav
 
     def clip_wav(self, start, end):
         """Small WAV slice for similarity previews. Reads only the needed
         frames straight from disk — never triggers a full song load."""
-        src = self.orig_path or stem_file(self.stems_dir, "mix")
-        if src is None:
-            return None
-        with sf.SoundFile(src) as f:
-            sr = f.samplerate
-            a = max(0, min(int(start * sr), f.frames))
-            b = max(a, min(int(end * sr), f.frames))
-            f.seek(a)
-            y = f.read(b - a, dtype="float32", always_2d=True)
-        if not self.orig_path:            # analysis mix is unnormalized mono
-            y = y / (np.abs(y).max() + 1e-9) * 0.9
+        if self.orig_path:
+            with sf.SoundFile(self.orig_path) as f:
+                sr = f.samplerate
+                a = max(0, min(int(start * sr), f.frames))
+                b = max(a, min(int(end * sr), f.frames))
+                f.seek(a)
+                y = f.read(b - a, dtype="float32", always_2d=True)
+        else:
+            # no original on disk (pruned library) — reconstruct the slice by
+            # summing the analysis stems; no "mix" stem file ever exists
+            y, sr = None, SR
+            for name in STEM_NAMES:
+                p = stem_file(self.stems_dir, name)
+                if p is None:
+                    continue
+                with sf.SoundFile(p) as f:
+                    sr = f.samplerate
+                    a = max(0, min(int(start * sr), f.frames))
+                    b = max(a, min(int(end * sr), f.frames))
+                    f.seek(a)
+                    part = f.read(b - a, dtype="float32", always_2d=True)
+                if part.ndim > 1 and part.shape[1] > 1:
+                    part = part.mean(axis=1, keepdims=True)
+                y = part if y is None else y[:len(part)] + part[:len(y)]
+            if y is None or not y.size:
+                return None
+            y = y / (np.abs(y).max() + 1e-9) * 0.9     # stems sum is unnormalized
         pcm16 = (np.clip(y, -1, 1) * 32767).astype("<i2")
         buf = io.BytesIO()
         with wave.open(buf, "wb") as w:
@@ -368,34 +388,35 @@ class Song:
             return self.playback_wav()
         if name not in self.tracks:
             return self.playback_wav()
-        cache = self.__dict__.setdefault("_track_wavs", {})
-        if name in cache:
+        with self._wav_lock:     # concurrent requests → decode once, not twice
+            cache = self.__dict__.setdefault("_track_wavs", {})
+            if name in cache:
+                return cache[name]
+            # prefer full-rate stereo HQ stem if available (drums/bass/vocals/other).
+            # WAV is streamed as-is; FLAC is decoded to WAV here (browsers get WAV
+            # either way). Result is cached, so the decode is one-time per stem.
+            hq = stem_file(self.hq_dir, name)
+            if hq is not None:
+                if hq.lower().endswith(".wav"):
+                    with open(hq, "rb") as f:
+                        cache[name] = f.read()
+                else:
+                    y, sr = sf.read(hq, dtype="float32", always_2d=False)
+                    buf = io.BytesIO()
+                    sf.write(buf, y, sr, format="WAV", subtype="PCM_16")
+                    cache[name] = buf.getvalue()
+                return cache[name]
+            scale = self.norm["mix"]
+            pcm = np.clip(self.tracks[name] / scale, -1, 1)
+            pcm16 = (pcm * 32767).astype("<i2")
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(self.sr)
+                w.writeframes(pcm16.tobytes())
+            cache[name] = buf.getvalue()
             return cache[name]
-        # prefer full-rate stereo HQ stem if available (drums/bass/vocals/other).
-        # WAV is streamed as-is; FLAC is decoded to WAV here (browsers get WAV
-        # either way). Result is cached, so the decode is one-time per stem.
-        hq = stem_file(self.hq_dir, name)
-        if hq is not None:
-            if hq.lower().endswith(".wav"):
-                with open(hq, "rb") as f:
-                    cache[name] = f.read()
-            else:
-                y, sr = sf.read(hq, dtype="float32", always_2d=False)
-                buf = io.BytesIO()
-                sf.write(buf, y, sr, format="WAV", subtype="PCM_16")
-                cache[name] = buf.getvalue()
-            return cache[name]
-        scale = self.norm["mix"]
-        pcm = np.clip(self.tracks[name] / scale, -1, 1)
-        pcm16 = (pcm * 32767).astype("<i2")
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(self.sr)
-            w.writeframes(pcm16.tobytes())
-        cache[name] = buf.getvalue()
-        return cache[name]
 
     def playback_info(self):
         self.load()
@@ -450,7 +471,8 @@ def _encode_png(rgb):
 # ---------------------------------------------------------------------------
 
 _SONGS = {}        # id -> stems_dir
-_SONG_CACHE = {}   # id -> Song
+_SONG_CACHE = {}   # id -> Song (LRU by insertion order; dicts preserve it)
+_SONG_CACHE_MAX = 8   # loaded songs are ~100-250 MB each — cap or browsing OOMs
 _CACHE_LOCK = threading.Lock()
 
 
@@ -460,6 +482,11 @@ def get_song(song_id):
             if song_id not in _SONGS:
                 return None
             _SONG_CACHE[song_id] = Song(song_id, _SONGS[song_id])
+        else:                                   # refresh LRU position
+            _SONG_CACHE[song_id] = _SONG_CACHE.pop(song_id)
+        while len(_SONG_CACHE) > _SONG_CACHE_MAX:
+            evicted = next(iter(_SONG_CACHE))
+            del _SONG_CACHE[evicted]            # in-flight refs keep it alive
         return _SONG_CACHE[song_id]
 
 
@@ -468,6 +495,11 @@ def register_song(song_id, stems_dir):
     with _CACHE_LOCK:
         _SONGS[song_id] = stems_dir
         _SONG_CACHE.pop(song_id, None)
+    # the new song has a fresh *_moments.npz — mark the similarity index stale so
+    # the next /api/similar rebuilds it in the background (CLAP already rescans)
+    with _MINDEX_LOCK:
+        if _MINDEX_STATE["status"] == "ready":
+            _MINDEX_STATE["status"] = "idle"
     print(f"  + ingested: {song_id}")
 
 
@@ -594,16 +626,20 @@ def _ensure_clapx():
     return _CLAPX["data"]
 
 
+_CLAP_TEXT_LOCK = threading.Lock()
+
+
 def _clap_text_vec(q_text):
     v = _CLAP_QCACHE.get(q_text)
     if v is not None:
         return v
     import torch
-    if _CLAP_TEXT["model"] is None:                 # text tower only, CPU (~450 MB)
-        from transformers import ClapTextModelWithProjection, AutoTokenizer
-        print(f"[clap] loading text encoder ({_CLAP_MODEL_ID}) ...")
-        _CLAP_TEXT["tok"] = AutoTokenizer.from_pretrained(_CLAP_MODEL_ID)
-        _CLAP_TEXT["model"] = ClapTextModelWithProjection.from_pretrained(_CLAP_MODEL_ID).eval()
+    with _CLAP_TEXT_LOCK:                           # two cold queries → one load
+        if _CLAP_TEXT["model"] is None:             # text tower only, CPU (~450 MB)
+            from transformers import ClapTextModelWithProjection, AutoTokenizer
+            print(f"[clap] loading text encoder ({_CLAP_MODEL_ID}) ...")
+            _CLAP_TEXT["tok"] = AutoTokenizer.from_pretrained(_CLAP_MODEL_ID)
+            _CLAP_TEXT["model"] = ClapTextModelWithProjection.from_pretrained(_CLAP_MODEL_ID).eval()
     with torch.no_grad():
         toks = _CLAP_TEXT["tok"]([q_text], return_tensors="pt", padding=True)
         e = _CLAP_TEXT["model"](**toks).text_embeds[0]
@@ -684,9 +720,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"demo": DEMO, "songs": len(_SONGS)})
 
             if path == "/api/songs":
-                return self._json([
-                    {"id": sid, "title": sid} for sid in sorted(_SONGS)
-                ])
+                with _CACHE_LOCK:          # register_song may be inserting right now
+                    ids = sorted(_SONGS)
+                return self._json([{"id": sid, "title": sid} for sid in ids])
 
             if path == "/api/song":
                 song = get_song(q.get("id", [""])[0])
@@ -773,7 +809,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, wav, "audio/wav", {"Accept-Ranges": "none"})
 
             if path == "/api/lyrics":
-                p = os.path.join(LIBRARY_DIR, f"{q['id'][0]}_lyrics.json")
+                sid = q["id"][0]
+                if sid not in _SONGS:      # also blocks path traversal via id
+                    return self._json({"error": "no lyrics"}, 404)
+                p = os.path.join(LIBRARY_DIR, f"{sid}_lyrics.json")
                 if not os.path.exists(p):
                     return self._json({"error": "no lyrics"}, 404)
                 with open(p, "rb") as f:
@@ -812,7 +851,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "no moments for song"}, 404)
                 try:
                     res = idx.query(sid, mi, weights=weights, k=k, exclude_same_song=True)
-                except KeyError:
+                except (KeyError, IndexError):
                     return self._json({"error": "moment not in index"}, 404)
                 seed = next(((s0, s1) for (_r, m2, s0, s1) in _MINDEX_SONGROWS.get(sid, [])
                              if m2 == mi), (0.0, 0.0))
@@ -826,7 +865,8 @@ class Handler(BaseHTTPRequestHandler):
                 })
 
             return self._json({"error": "not found"}, 404)
-        except (KeyError, ValueError) as e:
+        except (KeyError, ValueError, OverflowError) as e:
+            # OverflowError: int(float('inf')) from ?start=inf etc. — still a bad request
             return self._json({"error": f"bad request: {e}"}, 400)
         except BrokenPipeError:
             pass
@@ -838,6 +878,9 @@ class Handler(BaseHTTPRequestHandler):
         drums = q.get("drums", ["0"])[0] == "1"
         six = q.get("six", ["0"])[0] == "1"
         if DEMO:                                   # hosted preview: no server-side ingest
+            # drain the body first: on keep-alive, unread bytes would be parsed
+            # as the connection's next request line
+            self._read_exact(int(self.headers.get("Content-Length", 0)))
             return self._json({"error": "Adding music is disabled in the demo. "
                                "Run it locally to analyze your own library."}, 403)
         try:
@@ -884,7 +927,8 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_static(self, rel):
         rel = rel.lstrip("/")
         full = os.path.normpath(os.path.join(STATIC_DIR, rel))
-        if not full.startswith(STATIC_DIR) or not os.path.isfile(full):
+        # bare startswith would also match sibling dirs like <STATIC_DIR>_backup
+        if not full.startswith(STATIC_DIR + os.sep) or not os.path.isfile(full):
             return self._json({"error": "not found"}, 404)
         ctype = {
             ".html": "text/html; charset=utf-8",

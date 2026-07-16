@@ -39,11 +39,16 @@ def main():
     print(f"[galaxy] {len(files)} songs", flush=True)
 
     song_ids, song_idx, ts, durs, embs = [], [], [], [], []
-    for i, f in enumerate(files):
-        d = np.load(f)
+    for f in files:
+        try:
+            d = np.load(f)
+            s, e, emb = d["start_t"], d["end_t"], d["emb_mix"].astype(np.float32)
+        except Exception as ex:      # one corrupt npz must not kill the whole build
+            print(f"[galaxy] skipping {os.path.basename(f)}: {ex}", flush=True)
+            continue
+        i = len(song_ids)
         song_ids.append(os.path.basename(f)[: -len("_moments.npz")])
-        s, e = d["start_t"], d["end_t"]
-        embs.append(d["emb_mix"].astype(np.float32))
+        embs.append(emb)
         song_idx.append(np.full(len(s), i, np.int32))
         ts.append(((s + e) / 2).astype(np.float32))
         durs.append((e - s).astype(np.float32))
