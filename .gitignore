@@ -34,6 +34,7 @@ _incoming/
 # vibe axes (per-song, regenerable via compute_vibe.py)
 *_vibe.json
 galaxy.npz
+mindex_cache.npz
 
 # logs
 *.log

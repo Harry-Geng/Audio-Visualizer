@@ -32,7 +32,7 @@ import argparse
 import threading
 import wave
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 import numpy as np
 import soundfile as sf
@@ -525,20 +525,71 @@ _SIM_FACETS = {
 }
 
 
+_MINDEX_CACHE = os.path.join(LIBRARY_DIR, "mindex_cache.npz")
+
+
+def _mindex_fingerprint(files):
+    """Cheap change signature over the per-song moment files: count + newest mtime."""
+    newest = max((os.path.getmtime(f) for f in files), default=0.0)
+    return f"{len(files)}:{newest:.6f}"
+
+
+def _load_mindex_cache(fp):
+    """Rebuild a finalized MomentIndex from the consolidated cache, or None."""
+    from moment_index import MomentIndex
+    if not os.path.exists(_MINDEX_CACHE):
+        return None
+    try:
+        d = np.load(_MINDEX_CACHE, allow_pickle=False)
+        if str(d["fingerprint"]) != fp:
+            return None
+        idx = MomentIndex()
+        sids = [str(s) for s in d["row_song"]]
+        idx.rows = list(zip(sids, d["row_idx"].tolist(),
+                            d["row_start"].tolist(), d["row_end"].tolist()))
+        idx.facets = {k[len("facet_"):]: d[k] for k in d.files if k.startswith("facet_")}
+        idx._raw = {}
+        return idx
+    except Exception as e:
+        print(f"[moments] stale/corrupt index cache ignored ({e})")
+        return None
+
+
+def _save_mindex_cache(idx, fp):
+    try:
+        arrays = {f"facet_{k}": v for k, v in idx.facets.items()}
+        tmp = _MINDEX_CACHE[:-4] + "_part.npz"   # np.savez appends .npz if missing
+        np.savez(tmp, fingerprint=np.str_(fp),
+                 row_song=np.array([r[0] for r in idx.rows]),
+                 row_idx=np.array([r[1] for r in idx.rows], np.int32),
+                 row_start=np.array([r[2] for r in idx.rows], np.float32),
+                 row_end=np.array([r[3] for r in idx.rows], np.float32),
+                 **arrays)
+        os.replace(tmp, _MINDEX_CACHE)
+    except Exception as e:
+        print(f"[moments] couldn't write index cache: {e}")
+
+
 def _build_mindex():
     global _MINDEX, _MINDEX_SONGROWS
     try:
         from moment_index import MomentIndex
         files = sorted(glob.glob(os.path.join(LIBRARY_DIR, "*_moments.npz")))
         _MINDEX_STATE.update(total=len(files), loaded=0, status="building")
-        idx = MomentIndex()
-        for i, f in enumerate(files):
-            try:
-                idx.add_file(f)
-            except Exception as e:
-                print(f"[moments] skip {os.path.basename(f)}: {e}")
-            _MINDEX_STATE["loaded"] = i + 1
-        idx.finalize()
+        fp = _mindex_fingerprint(files)
+        idx = _load_mindex_cache(fp)      # one consolidated read ≈ seconds, not minutes
+        if idx is None:
+            idx = MomentIndex()
+            for i, f in enumerate(files):
+                try:
+                    idx.add_file(f)
+                except Exception as e:
+                    print(f"[moments] skip {os.path.basename(f)}: {e}")
+                _MINDEX_STATE["loaded"] = i + 1
+            idx.finalize()
+            _save_mindex_cache(idx, fp)
+        else:
+            _MINDEX_STATE["loaded"] = len(files)
         songrows = {}
         for r, (sid, mi, s0, s1) in enumerate(idx.rows):
             songrows.setdefault(sid, []).append((r, mi, s0, s1))
@@ -627,6 +678,63 @@ def _ensure_clapx():
 
 
 _CLAP_TEXT_LOCK = threading.Lock()
+_CLAP_AUDIO = {"model": None, "proc": None}     # lazy audio tower (hum-to-search)
+
+
+def _clap_audio_vec(pcm, sr):
+    """CLAP audio embedding of a mono float32 buffer (hum/mic query)."""
+    import torch
+    with _CLAP_TEXT_LOCK:
+        if _CLAP_AUDIO["model"] is None:
+            from transformers import ClapAudioModelWithProjection, ClapProcessor
+            print(f"[clap] loading audio encoder ({_CLAP_MODEL_ID}) ...")
+            _CLAP_AUDIO["proc"] = ClapProcessor.from_pretrained(_CLAP_MODEL_ID)
+            _CLAP_AUDIO["model"] = ClapAudioModelWithProjection.from_pretrained(_CLAP_MODEL_ID).eval()
+    proc, model = _CLAP_AUDIO["proc"], _CLAP_AUDIO["model"]
+    try:
+        inputs = proc(audio=[pcm], sampling_rate=sr, return_tensors="pt", padding=True)
+    except (TypeError, ValueError):                 # transformers 4.x kwarg
+        inputs = proc(audios=[pcm], sampling_rate=sr, return_tensors="pt", padding=True)
+    inputs = {k: v for k, v in inputs.items() if k in ("input_features", "is_longer")}
+    with torch.no_grad():
+        e = model(**inputs).audio_embeds[0]
+        e = e / (e.norm() + 1e-9)
+    return e.numpy().astype(np.float32)
+
+
+def _rank_clap(vec, k, per_song_cap=2):
+    """Rank library moments against a CLAP-space vector (shared by text + hum)."""
+    snap = _ensure_clapx()
+    if snap is None:
+        return None
+    emb, meta = snap
+    scores = emb @ vec
+    out, per_song = [], {}
+    for i in np.argsort(-scores):
+        sid, s, e = meta[i]
+        if per_song.get(sid, 0) >= per_song_cap:
+            continue
+        per_song[sid] = per_song.get(sid, 0) + 1
+        out.append({"song_id": sid, "title": sid, "start_t": s,
+                    "end_t": e, "score": float(scores[i])})
+        if len(out) >= k:
+            break
+    return out
+
+
+_TASTE = {"mtime": 0.0, "data": None}
+
+
+def _load_taste():
+    p = os.path.join(LIBRARY_DIR, "taste.json")
+    if not os.path.exists(p):
+        return None
+    m = os.path.getmtime(p)
+    if _TASTE["data"] is None or m != _TASTE["mtime"]:
+        with open(p, encoding="utf-8") as f:
+            _TASTE["data"] = f.read()
+        _TASTE["mtime"] = m
+    return _TASTE["data"]
 
 
 def _clap_text_vec(q_text):
@@ -719,6 +827,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/appinfo":
                 return self._json({"demo": DEMO, "songs": len(_SONGS)})
 
+            if path == "/api/taste":
+                t = _load_taste()
+                if t is None:
+                    return self._json({"error": "no taste profile — run compute_taste.py"}, 404)
+                return self._send(200, t, "application/json")
+
             if path == "/api/songs":
                 with _CACHE_LOCK:          # register_song may be inserting right now
                     ids = sorted(_SONGS)
@@ -763,23 +877,10 @@ class Handler(BaseHTTPRequestHandler):
                 q_text = q.get("q", [""])[0].strip()
                 if not q_text:
                     return self._json({"error": "empty query"}, 400)
-                snap = _ensure_clapx()
-                if snap is None:
-                    return self._json({"status": _CLAPX["status"]}, 202)
                 k = max(1, min(50, int(q.get("k", ["20"])[0])))
-                emb, meta = snap
-                scores = emb @ _clap_text_vec(q_text)
-                order = np.argsort(-scores)
-                out, per_song = [], {}
-                for i in order:
-                    sid, s, e = meta[i]
-                    if per_song.get(sid, 0) >= 2:        # cap per song for variety
-                        continue
-                    per_song[sid] = per_song.get(sid, 0) + 1
-                    out.append({"song_id": sid, "title": sid, "start_t": s,
-                                "end_t": e, "score": float(scores[i])})
-                    if len(out) >= k:
-                        break
+                out = _rank_clap(_clap_text_vec(q_text), k)
+                if out is None:
+                    return self._json({"status": _CLAPX["status"]}, 202)
                 total = len(glob.glob(os.path.join(LIBRARY_DIR, "*_moments.npz")))
                 return self._json({"query": q_text, "results": out,
                                    "coverage": {"songs": _CLAPX["files"], "total": total}})
@@ -877,15 +978,27 @@ class Handler(BaseHTTPRequestHandler):
         hq = q.get("hq", ["0"])[0] == "1"
         drums = q.get("drums", ["0"])[0] == "1"
         six = q.get("six", ["0"])[0] == "1"
-        if DEMO:                                   # hosted preview: no server-side ingest
-            # drain the body first: on keep-alive, unread bytes would be parsed
-            # as the connection's next request line
-            self._read_exact(int(self.headers.get("Content-Length", 0)))
-            return self._json({"error": "Adding music is disabled in the demo. "
-                               "Run it locally to analyze your own library."}, 403)
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = self._read_exact(length)
+
+            if u.path == "/api/humsearch":
+                # body = raw mono float32 PCM (the browser decodes/resamples the
+                # mic clip itself, so the server never parses audio containers)
+                sr = max(8000, min(96000, int(self.headers.get("X-SR", "48000"))))
+                pcm = np.frombuffer(body, dtype=np.float32)
+                if pcm.size < sr // 2:
+                    return self._json({"error": "clip too short — hum for a couple of seconds"}, 400)
+                pcm = np.ascontiguousarray(pcm[: sr * 30])
+                k = max(1, min(50, int(q.get("k", ["20"])[0])))
+                res = _rank_clap(_clap_audio_vec(pcm, sr), k)
+                if res is None:
+                    return self._json({"status": _CLAPX["status"]}, 202)
+                return self._json({"results": res})
+
+            if DEMO:                               # hosted preview: no server-side ingest
+                return self._json({"error": "Adding music is disabled in the demo. "
+                                   "Run it locally to analyze your own library."}, 403)
 
             if u.path == "/api/ingest_url":
                 data = json.loads(body or b"{}")
@@ -895,7 +1008,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(ingest.start_url_job(url, hq_vocals=hq, drum_kit=drums, six_stem=six))
 
             if u.path == "/api/ingest_file":
-                fname = os.path.basename(self.headers.get("X-Filename", "upload"))
+                # the client percent-encodes the filename for header safety —
+                # decode it or %26 etc. gets baked into the permanent song id
+                fname = os.path.basename(unquote(self.headers.get("X-Filename", "upload")))
                 if not body:
                     return self._json({"error": "empty body"}, 400)
                 os.makedirs(_INCOMING, exist_ok=True)
