@@ -59,6 +59,8 @@ const els = {
   liveBtn: $("#live-btn"), liveView: $("#live-view"), liveDevice: $("#live-device"),
   liveStart: $("#live-start"), liveStop: $("#live-stop"), liveLevel: $("#live-level"),
   liveHelpBtn: $("#live-help-btn"), liveHelp: $("#live-help"), liveCanvas: $("#live-canvas"),
+  eqBtn: $("#eq-btn"), eq: $("#eq"), eqLanes: $("#eq-lanes"),
+  eqReset: $("#eq-reset"), eqClose: $("#eq-close"),
 };
 const DPR = () => window.devicePixelRatio || 1;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -122,6 +124,9 @@ async function init() {
   els.radioBtn.onclick = () => Radio.toggle();
   els.tasteBtn.onclick = () => Taste.toggle();
   els.tasteClose.onclick = () => Taste.toggle();
+  els.eqBtn.onclick = () => EQ.toggle();
+  els.eqClose.onclick = () => EQ.toggle();
+  els.eqReset.onclick = () => EQ.flatten();
   els.simHum.onclick = () => Hum.toggle();
   els.tbarNext.onclick = () => Radio.advance();        // skip to the queued track now
   els.simRefresh.onclick = () => Similar.find();
@@ -159,6 +164,7 @@ async function init() {
   Transport.init();
   Ingest.setup();
   Live.setup();
+  EQ.setup();
   if (songs.length) loadSong(songs[0].id);
   else els.addPanel.hidden = false;     // no songs yet → invite an add
 }
@@ -623,6 +629,7 @@ function setupInteractions() {
       if (Lyrics.visible) Lyrics.toggle();
       if (Galaxy.visible) Galaxy.toggle();
       if (Taste.visible) Taste.toggle();
+      if (EQ.on) EQ.toggle();
       if (e.target.blur) e.target.blur();
       return;
     }
@@ -1477,6 +1484,7 @@ const Hum = {
 const Radio = {
   on: false, _next: null, _picking: false, _advancing: false, history: [],
   FADE: 5, FADEIN: 3,                    // seconds: outro fade-out / entry fade-in
+  MINPLAY: 16,                           // seconds a track must play before its exit fade
   _fading: false, _fadeT: null, _fadeInPending: false,
   _joinT: null, _nextBuf: null, _nextBufFor: null,
   _pickP: null, _lastPickAt: 0, _iv: null,
@@ -1639,6 +1647,12 @@ const Radio = {
           cand._beats = m.features.beats || null;
           cand._tempo = m.features.tempo || 0;
         }
+        // pull the join earlier if the moment sits too close to the end —
+        // the track must play ≥ MINPLAY s before its own exit fade starts
+        if (m && m.duration) {
+          const maxJoin = Math.max(0, m.duration - this.FADE - 0.5 - this.MINPLAY);
+          if ((cand.start_t || 0) > maxJoin) cand.start_t = maxJoin;
+        }
       } catch {}
     }
     this._next = cand;
@@ -1690,15 +1704,35 @@ const Radio = {
       // ── beat-matched entry ──
       // join ON one of the incoming track's beats (not mid-bar), and enter at
       // the outgoing tempo when within vinyl range, gliding to native after.
-      let joinT = Math.max(0, (nx.start_t || 0) - 2);
+      // cap the join so ≥ MINPLAY s play before checkTick starts the exit fade
+      // (the pick-time clamp used /api/song metadata; this one is authoritative)
+      const maxJoin = Math.max(0, S.meta.duration - this.FADE - 0.5 - this.MINPLAY);
+      let joinT = Math.min(maxJoin, Math.max(0, (nx.start_t || 0) - 2));
       if (nx._beats && nx._beats.length) {
-        const target = Math.max(0, (nx.start_t || 0) - 1.5);
+        const target = Math.min(maxJoin, Math.max(0, (nx.start_t || 0) - 1.5));
         let best = joinT, bd = Infinity;
         for (const b of nx._beats) {
+          if (b > maxJoin) continue;               // never snap past the cap
           const d = Math.abs(b - target);
           if (d < bd) { bd = d; best = b; }
         }
         joinT = Math.max(0, best);
+      }
+      // never join so late that the song only plays a few seconds: guarantee
+      // ~16s of real play before the next fade-out would begin
+      const minTail = 16 + this.FADE + 0.5;
+      if (S.meta.duration && joinT > S.meta.duration - minTail) {
+        let target = Math.max(0, S.meta.duration - minTail);
+        if (nx._beats && nx._beats.length) {          // re-snap to a beat at/before it
+          let best2 = target, bd2 = Infinity;
+          for (const b of nx._beats) {
+            if (b > target + 0.25) break;
+            const d = Math.abs(b - target);
+            if (d < bd2) { bd2 = d; best2 = b; }
+          }
+          target = best2;
+        }
+        joinT = Math.max(0, target);
       }
       let rate = 1;
       if (outTempo && nx._tempo) {
@@ -1726,6 +1760,7 @@ const Transport = {
   ac: null, master: null, buffers: new Map(), loading: new Map(),
   sources: [], playing: false, offset: 0, startedAt: 0, _starting: false, activeKey: "",
   analysers: {}, sceneMode: false, _td: null, _fd: null,
+  eqMode: false, eqFilters: {},         // per-stem EQ view: BiquadFilter chains keyed by stem
   gainNodes: {}, _mode: null,           // per-stem GainNodes + "full"|"components"
   masterVol: 1,                         // overall tab volume (header dial)
   _rate: 1,                             // playback rate (radio beat-matching)
@@ -1866,6 +1901,38 @@ const Transport = {
     this._starting = true;              // freeze the clock until audio truly starts
     const off = this.offset;
 
+    if (this.eqMode && typeof EQ !== "undefined") {
+      // Per-stem EQ view: each base stem plays audibly through its own
+      // lowshelf→peak→highshelf chain, then an analyser (PRE-gain, so the
+      // spectrum reflects the EQ and a muted stem still animates), then a
+      // gain that honours solo/mute/faders, then master.
+      const ids = this.eqStemIds(); this.activeKey = "eq:" + ids.join(",");
+      this.eqFilters = {};
+      let bufs;
+      try { bufs = await Promise.all(ids.map(id => this.load(id))); }
+      catch { if (gen === this._gen) { this._starting = false; this.pause(); } return; }
+      if (gen !== this._gen || !this.playing) return;   // superseded while decoding
+      this.startedAt = this.ac.currentTime; this._starting = false;
+      if (!(typeof Radio !== "undefined" && Radio.consumeFadeIn()))
+        this.master.gain.value = this.masterVol;
+      const anySolo = ids.some(id => { const r = this._row(id); return r && r.solo; });
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i], buf = bufs[i]; if (!buf) continue;
+        const src = this.ac.createBufferSource(); src.buffer = buf;
+        src.playbackRate.value = this._rate;
+        const chain = EQ.makeChain(this.ac, id);
+        const an = this.ac.createAnalyser(); an.fftSize = 2048; an.smoothingTimeConstant = 0.7;
+        const g = this.ac.createGain();
+        const r = this._row(id);
+        const on = anySolo ? (r && r.solo ? 1 : 0) : (r && r.mute ? 0 : 1);
+        g.gain.value = on * this.rowVol(id);
+        src.connect(chain.input); chain.output.connect(an); an.connect(g); g.connect(this.master);
+        this.analysers[id] = an; this.gainNodes[id] = g; this.eqFilters[id] = chain.nodes;
+        if (off < buf.duration) { src.start(0, off); this.sources.push(src); }
+      }
+      return;
+    }
+
     if (this.sceneMode && typeof Scene !== "undefined" && Scene.allInstrumentIds) {
       // Audio = full-quality original (unless soloing/muting); per-instrument
       // stems play SILENTLY into analysers so the visuals stay reactive.
@@ -1949,6 +2016,12 @@ const Transport = {
     r.vol = v;
     syncRowBtns();
     if (!this.playing) return;
+    if (this.eqMode) {                              // per-stem gain, live (analyser is pre-gain)
+      const g = this.gainNodes[id]; if (!g) return;
+      const anySolo = this.eqStemIds().some(x => { const rr = this._row(x); return rr && rr.solo; });
+      const on = anySolo ? (r.solo ? 1 : 0) : (r.mute ? 0 : 1);
+      g.gain.value = on * v; return;
+    }
     if (this.sceneMode) {
       const g = this.gainNodes[id]; if (!g) return;
       const aud = (typeof Scene !== "undefined") ? Scene.audibleSet() : "FULL";
@@ -2001,7 +2074,19 @@ const Transport = {
   },
   setSceneMode(on) {
     this.sceneMode = on;
+    if (on) this.eqMode = false;             // the two playback modes are mutually exclusive
     if (this.playing) { this.offset = this.curTime(); this.startedAt = this.ac.currentTime; this.startSources(); }
+  },
+  setEqMode(on) {
+    this.eqMode = on;
+    if (on) this.sceneMode = false;
+    if (this.playing) { this.offset = this.curTime(); this.startedAt = this.ac.currentTime; this.startSources(); }
+  },
+  _row(id) { return S.rows.find(r => r.track.id === id); },
+  // the base stems the EQ view operates on (drums/bass/vocals/other)
+  eqStemIds() {
+    return S.rows.filter(r => r.track.depth === 0 && r.track.id !== "mix" && STEMS.includes(r.track.id))
+                 .map(r => r.track.id);
   },
 
   async toggle() {
