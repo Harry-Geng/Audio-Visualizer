@@ -47,6 +47,9 @@ const els = {
   galTip: $("#gal-tip"), galStatus: $("#gal-status"), galClose: $("#gal-close"),
   radioBtn: $("#radio-btn"), tbarNext: $("#tbar-next"), tbarNextLabel: $("#tbar-next-label"),
   tbarJoin: $("#tbar-join"), tbarExit: $("#tbar-exit"),
+  tasteBtn: $("#taste-btn"), taste: $("#taste"), tasteTitle: $("#taste-title"),
+  tasteClose: $("#taste-close"), tasteBody: $("#taste-body"),
+  simHum: $("#sim-hum"),
   readout: $("#readout"), ruler: $("#ruler"), tracks: $("#tracks"),
   overlay: $("#overlay"), overlayWrap: $("#overlay-wrap"),
   playhead: $("#playhead"), cursor: $("#cursor"), scroll: $("#scroll"),
@@ -117,6 +120,9 @@ async function init() {
   els.galBtn.onclick = () => Galaxy.toggle();
   els.galClose.onclick = () => Galaxy.toggle();
   els.radioBtn.onclick = () => Radio.toggle();
+  els.tasteBtn.onclick = () => Taste.toggle();
+  els.tasteClose.onclick = () => Taste.toggle();
+  els.simHum.onclick = () => Hum.toggle();
   els.tbarNext.onclick = () => Radio.advance();        // skip to the queued track now
   els.simRefresh.onclick = () => Similar.find();
   els.simFacet.onchange = () => { Similar.facet = els.simFacet.value; Similar.find(); };
@@ -616,6 +622,7 @@ function setupInteractions() {
       els.dropOverlay.hidden = true;
       if (Lyrics.visible) Lyrics.toggle();
       if (Galaxy.visible) Galaxy.toggle();
+      if (Taste.visible) Taste.toggle();
       if (e.target.blur) e.target.blur();
       return;
     }
@@ -1232,6 +1239,237 @@ const Galaxy = {
 };
 
 // ==========================================================================
+// Taste dashboard — "your musical taste, mapped". Renders /api/taste (offline
+// k-means over the MERT moment embeddings, labeled via CLAP text probes) as a
+// ranked list of sound families: share bars, representative songs, playable
+// exemplar moments.
+// ==========================================================================
+const Taste = {
+  visible: false, _loaded: false, _loading: false,
+  _prev: null, _prevBtn: null,          // side-channel exemplar preview (à la Similar)
+
+  toggle() {
+    this.visible = !this.visible;
+    els.taste.hidden = !this.visible;
+    document.body.classList.toggle("taste-on", this.visible);
+    els.tasteBtn.classList.toggle("on", this.visible);
+    if (this.visible) this.load();
+    else this.stopPreview();
+  },
+
+  async load() {
+    if (this._loaded || this._loading) return;
+    this._loading = true;
+    els.tasteBody.innerHTML = `<div class="taste-empty">reading your taste profile…</div>`;
+    try {
+      const r = await fetch("/api/taste");
+      const d = await r.json().catch(() => null);
+      if (!r.ok || !d || d.error) {                 // 404 → compute_taste.py hasn't run
+        els.tasteBody.innerHTML =
+          `<div class="taste-empty">${escapeHtml((d && d.error) || "taste profile unavailable")}</div>`;
+        return;
+      }
+      this._loaded = true;
+      this.render(d);
+    } catch {
+      els.tasteBody.innerHTML = `<div class="taste-empty">request failed</div>`;
+    } finally { this._loading = false; }
+  },
+
+  render(d) {
+    els.tasteTitle.textContent = `◉ your taste — the sound families of ${d.n_songs} songs`;
+    els.tasteBody.innerHTML = "";
+    const clusters = d.clusters || [];
+    if (!clusters.length) { els.tasteBody.innerHTML = `<div class="taste-empty">no sound families yet</div>`; return; }
+    const maxShare = Math.max(...clusters.map(c => c.share || 0), 1e-6);
+    clusters.forEach((c, i) => {
+      const card = document.createElement("div");
+      card.className = "taste-card";
+      const pct = ((c.share || 0) * 100).toFixed(1);
+      const alts = (c.alt_labels || []).map(escapeHtml).join(" · ");
+      card.innerHTML =
+        `<div class="taste-rank">${i + 1}</div>
+         <div class="taste-main">
+           <div class="taste-label">${escapeHtml(c.label || "family " + c.id)}</div>
+           <div class="taste-share">
+             <div class="taste-share-fill" style="width:${((c.share || 0) / maxShare * 100).toFixed(1)}%"></div>
+             <span>${pct}%</span>
+           </div>
+           ${alts ? `<div class="taste-alts">${alts}</div>` : ""}
+           <div class="taste-songs"></div>
+           <div class="taste-ex"></div>
+         </div>`;
+      const songs = card.querySelector(".taste-songs");
+      for (const ts of (c.top_songs || [])) {
+        const chip = document.createElement("button");
+        chip.className = "taste-chip";
+        chip.textContent = ts.song_id;
+        chip.title = `open ${ts.song_id} — ${((ts.share || 0) * 100).toFixed(0)}% of this family`;
+        chip.onclick = () => this.open(ts.song_id);
+        songs.appendChild(chip);
+      }
+      const exs = card.querySelector(".taste-ex");
+      for (const ex of (c.exemplars || [])) {
+        const pill = document.createElement("button");
+        pill.className = "taste-pill";
+        pill.textContent = `▶ ${ex.song_id} @${lsTime(ex.t)}`;
+        pill.title = "play this moment";
+        pill.onclick = () => this.preview(ex, pill);
+        exs.appendChild(pill);
+      }
+      els.tasteBody.appendChild(card);
+    });
+  },
+
+  // play an exemplar moment through the shared side-channel <audio>, same
+  // approach as Similar.preview — never touches the main transport's buffers
+  preview(ex, btn) {
+    if (this._prevBtn === btn) { this.stopPreview(); return; }   // toggle off
+    this.stopPreview();
+    if (Transport.playing) Transport.toggle();
+    const a = this._prev || (this._prev = new Audio());
+    const s = Math.max(0, ex.t), e = ex.end != null ? ex.end : ex.t + 6;
+    a.src = `/api/clip?id=${encodeURIComponent(ex.song_id)}` +
+            `&start=${s.toFixed(2)}&end=${e.toFixed(2)}`;
+    a.volume = Math.min(1, Transport.masterVol);
+    a.onended = () => this.stopPreview();
+    // pause() rejects the PREVIOUS play() promise asynchronously — only tear
+    // down if this preview is still the active one when the rejection lands
+    a.play().catch(() => { if (this._prevBtn === btn) this.stopPreview(); });
+    btn.textContent = btn.textContent.replace("▶", "■");
+    btn.classList.add("playing");
+    this._prevBtn = btn;
+  },
+
+  stopPreview() {
+    if (this._prev) { this._prev.pause(); this._prev.removeAttribute("src"); }
+    if (this._prevBtn) {
+      this._prevBtn.textContent = this._prevBtn.textContent.replace("■", "▶");
+      this._prevBtn.classList.remove("playing");
+    }
+    this._prevBtn = null;
+  },
+
+  async open(id) {
+    this.stopPreview();
+    if (this.visible) this.toggle();               // close the overlay
+    if (S.songId !== id) {
+      els.song.value = id;
+      await loadSong(id);
+    }
+  },
+};
+
+// ==========================================================================
+// Hum-to-search — record up to 10 s from the mic, resample to 48 k mono via an
+// OfflineAudioContext, POST the raw Float32 PCM to /api/humsearch, and show the
+// matches in the ✧ similar panel.
+// ==========================================================================
+const Hum = {
+  recording: false, _starting: false, _rec: null, _stream: null, _chunks: null, _timer: null,
+  TITLE: "hum or sing a melody — find moments that sound like it",
+  MAX_S: 10,
+
+  toggle() { this.recording ? this.stop() : this.start(); },
+
+  async start() {
+    if (this._starting) return;                     // getUserMedia still resolving
+    this._starting = true;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {                                       // permission denied / no mic
+      this._starting = false;
+      els.simHum.title = "microphone blocked — allow mic access in the browser and try again";
+      els.simHum.classList.add("denied");
+      setTimeout(() => { els.simHum.classList.remove("denied"); els.simHum.title = this.TITLE; }, 2500);
+      return;
+    }
+    this._starting = false;
+    let rec;
+    try { rec = new MediaRecorder(stream); }
+    catch {
+      stream.getTracks().forEach(t => t.stop());
+      els.simHum.title = "recording not supported in this browser";
+      return;
+    }
+    if (Transport.playing) Transport.toggle();      // don't record the song playing over you
+    Similar.stopPreview();
+    this._stream = stream; this._rec = rec; this._chunks = [];
+    rec.ondataavailable = e => { if (e.data && e.data.size) this._chunks.push(e.data); };
+    rec.onstop = () => this._finish();
+    rec.start();
+    this.recording = true;
+    els.simHum.classList.add("rec");
+    els.simHum.title = "recording — click to stop (max 10s)";
+    this._timer = setTimeout(() => this.stop(), this.MAX_S * 1000);
+  },
+
+  stop() {
+    clearTimeout(this._timer);
+    this.recording = false;
+    els.simHum.classList.remove("rec");
+    els.simHum.title = this.TITLE;
+    if (this._rec && this._rec.state !== "inactive") this._rec.stop();   // → onstop → _finish
+  },
+
+  async _finish() {
+    const stream = this._stream, rec = this._rec, chunks = this._chunks || [];
+    this._stream = this._rec = this._chunks = null;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (!chunks.length) return;
+    const blob = new Blob(chunks, { type: (rec && rec.mimeType) || "" });
+
+    if (!Similar.visible) Similar.toggle();         // toggle kicks off find(); superseded below
+    clearTimeout(Similar._poll);
+    const req = ++Similar._req;                     // stale finds/searches may not render
+    els.simSeed.textContent = "🎤 hummed query";
+    els.simResults.innerHTML = `<div class="sim-empty">analyzing your hum…</div>`;
+
+    // decode the compressed recording, then mix to mono @48k via an offline
+    // render (handles resampling from whatever rate the mic ran at)
+    let pcm;
+    try {
+      const ab = await blob.arrayBuffer();
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      const dec = await ac.decodeAudioData(ab);
+      ac.close();
+      const oc = new OfflineAudioContext(1, Math.max(1, Math.round(dec.duration * 48000)), 48000);
+      const src = oc.createBufferSource();
+      src.buffer = dec; src.connect(oc.destination); src.start(0);
+      pcm = (await oc.startRendering()).getChannelData(0);
+    } catch {
+      if (req === Similar._req) els.simResults.innerHTML = `<div class="sim-empty">could not decode the recording</div>`;
+      return;
+    }
+
+    let r;
+    try {
+      r = await fetch("/api/humsearch?k=20", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream", "X-SR": "48000" },
+        body: pcm,
+      });
+    } catch {
+      if (req === Similar._req) els.simResults.innerHTML = `<div class="sim-empty">request failed</div>`;
+      return;
+    }
+    if (req !== Similar._req) return;               // superseded while fetching
+    if (r.status === 202) {
+      els.simResults.innerHTML = `<div class="sim-empty">sound index still building — try again in a moment</div>`;
+      return;
+    }
+    const d = await r.json().catch(() => null);
+    if (req !== Similar._req) return;
+    if (!d || d.error) {                            // e.g. 400 "clip too short..."
+      els.simResults.innerHTML = `<div class="sim-empty">${d ? escapeHtml(d.error) : "error"}</div>`;
+      return;
+    }
+    Similar.render(d);
+  },
+};
+
+// ==========================================================================
 // Infinite radio — when a song ends, walk the similarity graph into the next
 // one: the outro's closest moment elsewhere in the library becomes the entry
 // point of the next track. Facet follows the ✧ similar panel's selector.
@@ -1666,6 +1904,7 @@ const Transport = {
   async play() {
     Similar.stopPreview();               // don't overlap side-channel previews
     Galaxy.stopPreview();
+    Taste.stopPreview();
     if (this.ac.state === "suspended") await this.ac.resume();
     this.offset = this.curTime();
     // at the very end, play restarts the song — otherwise tick's end-of-song

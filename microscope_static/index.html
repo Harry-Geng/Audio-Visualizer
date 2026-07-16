@@ -55,6 +55,7 @@
     <button id="sim-btn" title="find moments across the library that sound like the current spot">✧ similar</button>
     <button id="gal-btn" title="galaxy map — every moment of every song as a starfield">✹ map</button>
     <button id="radio-btn" title="infinite radio — when a song ends, flow into the most similar moment elsewhere in the library">📻 radio</button>
+    <button id="taste-btn" title="your musical taste, mapped — the sound families of your library">◉ taste</button>
     <div class="spacer"></div>
     <div class="readout" id="readout"></div>
   </header>
@@ -142,6 +143,14 @@
     </div>
   </div>
 
+  <div id="taste" hidden>
+    <div id="taste-hud">
+      <span id="taste-title">◉ your taste — the sound families of your library</span>
+      <button id="taste-close" title="exit taste view (esc)">✕</button>
+    </div>
+    <div id="taste-body"></div>
+  </div>
+
   <div id="sim-panel">
     <div class="sim-head">
       <span class="sim-h-title">✧ similar moments</span>
@@ -160,6 +169,7 @@
     <div class="sim-search">
       <input id="sim-q" type="text" placeholder="⌕ describe a sound… “dark moody bassline”">
       <button id="sim-q-go" title="search the library by description">go</button>
+      <button id="sim-hum" title="hum or sing a melody — find moments that sound like it">🎤</button>
     </div>
     <div id="sim-seed"></div>
     <div id="sim-results"></div>

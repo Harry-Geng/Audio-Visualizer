@@ -401,6 +401,80 @@ body.sim-on #sim-panel { display: flex; }
 .sim-info { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
 .sim-title { font-size: 12.5px; color: #e8edf6; line-height: 1.25; }
 .sim-time { font-size: 10.5px; color: #8f9bb3; font-variant-numeric: tabular-nums; }
+/* hum-to-search mic button (inside .sim-search) */
+#sim-hum { padding: 4px 8px; }
+#sim-hum.rec {
+  background: #b03030; border-color: #ff5a5a; color: #fff;
+  animation: hum-pulse 1.1s ease-in-out infinite;
+}
+#sim-hum.denied { border-color: #e05050; color: #ff9a9a; }
+@keyframes hum-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 90, 90, .55); }
+  50%      { box-shadow: 0 0 0 6px rgba(255, 90, 90, 0); }
+}
+
+/* ── taste dashboard (fullscreen overlay) ─────────────────────────────────── */
+#taste-btn.on { background: #2a3550; border-color: #7fd0ff; color: #fff; }
+#taste {
+  position: fixed; inset: 0; z-index: 95; background: rgba(5, 5, 8, .97);
+  display: flex; flex-direction: column;
+}
+#taste-hud {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 14px;
+  padding: 11px 16px; border-bottom: 1px solid var(--line);
+  background: linear-gradient(rgba(5,5,8,.9), rgba(5,5,8,.6));
+  color: #cdd6e6; font-size: 13px;
+}
+#taste-title { font-weight: 600; }
+#taste-close {
+  margin-left: auto; background: #1c1f29; color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  font-size: 12px; padding: 4px 9px; cursor: pointer;
+}
+#taste-close:hover { background: #2a3550; border-color: #7fd0ff; }
+#taste-body { flex: 1; overflow-y: auto; padding: 20px 18px 48px; }
+.taste-empty { color: var(--dim); font-size: 13px; font-style: italic; text-align: center; padding: 22vh 24px 0; }
+
+.taste-card {
+  display: flex; gap: 16px; max-width: 880px; margin: 0 auto 12px;
+  background: #171a23; border: 1px solid var(--line); border-radius: 9px;
+  padding: 14px 18px;
+}
+.taste-rank {
+  flex: 0 0 34px; font-size: 21px; font-weight: 700; color: #4a5570;
+  font-variant-numeric: tabular-nums; text-align: right; line-height: 1.2;
+}
+.taste-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.taste-label { font-size: 16px; font-weight: 600; color: #e8edf6; line-height: 1.25; }
+.taste-share {
+  position: relative; height: 14px; border-radius: 7px; overflow: hidden;
+  background: rgba(255, 255, 255, .07); max-width: 520px;
+  display: flex; align-items: center;
+}
+.taste-share-fill {
+  position: absolute; left: 0; top: 0; bottom: 0; border-radius: 7px;
+  background: linear-gradient(90deg, rgba(127,208,255,.75), rgba(127,208,255,.22));
+}
+.taste-share span {
+  position: relative; z-index: 1; font-size: 10.5px; color: #dfe9f6;
+  padding-left: 8px; font-variant-numeric: tabular-nums; text-shadow: 0 0 4px rgba(0,0,0,.6);
+}
+.taste-alts { font-size: 11px; color: var(--dim); }
+.taste-songs, .taste-ex { display: flex; flex-wrap: wrap; gap: 6px; }
+.taste-chip {
+  padding: 3px 10px; border-radius: 12px; font-size: 11px;
+  background: #1c2130; border: 1px solid var(--line); color: #cdd6e6; cursor: pointer;
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.taste-chip:hover { background: #2a3550; border-color: #7fd0ff; color: #fff; }
+.taste-pill {
+  padding: 3px 10px; border-radius: 12px; font-size: 11px;
+  background: #232838; border: 1px solid var(--line); color: #8f9bb3; cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.taste-pill:hover { border-color: #7fd0ff; color: #fff; }
+.taste-pill.playing { background: #7fd0ff; border-color: #7fd0ff; color: #0d1017; }
+
 /* ── galaxy map (fullscreen starfield) ────────────────────────────────────── */
 #gal-btn.on { background: #2a3550; border-color: #b48cff; color: #fff; }
 #galaxy {
