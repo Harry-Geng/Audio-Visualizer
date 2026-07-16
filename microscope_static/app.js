@@ -1585,6 +1585,16 @@ const Radio = {
       const recycled = this.history.find(h => h !== S.songId);
       if (recycled) cand = { song_id: recycled, start_t: 0, score: 0 };
     }
+    if (cand) {                // beat grid + tempo of the incoming track (beat-matching)
+      try {
+        const m = await fetch(`/api/song?id=${encodeURIComponent(cand.song_id)}`)
+          .then(r => r.ok ? r.json() : null);
+        if (m && m.features) {
+          cand._beats = m.features.beats || null;
+          cand._tempo = m.features.tempo || 0;
+        }
+      } catch {}
+    }
     this._next = cand;
     this.showNext();
     if (cand && this.on) this.predecode(cand.song_id);   // decode now → gapless switch
@@ -1619,6 +1629,7 @@ const Radio = {
       if (!nx) { Transport.pause(); return; }
       this.history.push(S.songId);
       if (this.history.length > 12) this.history.shift();
+      const outTempo = (S.meta.features && S.meta.features.tempo) || 0;
       this._fadeInPending = true;                        // ease the entry in
       els.song.value = nx.song_id;
       await loadSong(nx.song_id);
@@ -1629,10 +1640,32 @@ const Radio = {
       if (this._nextBuf && this._nextBufFor === nx.song_id)
         Transport.buffers.set("full", this._nextBuf);    // pre-decoded: no decode gap
       this._nextBuf = null; this._nextBufFor = null;
-      const joinT = Math.max(0, (nx.start_t || 0) - 2);
+      // ── beat-matched entry ──
+      // join ON one of the incoming track's beats (not mid-bar), and enter at
+      // the outgoing tempo when within vinyl range, gliding to native after.
+      let joinT = Math.max(0, (nx.start_t || 0) - 2);
+      if (nx._beats && nx._beats.length) {
+        const target = Math.max(0, (nx.start_t || 0) - 1.5);
+        let best = joinT, bd = Infinity;
+        for (const b of nx._beats) {
+          const d = Math.abs(b - target);
+          if (d < bd) { bd = d; best = b; }
+        }
+        joinT = Math.max(0, best);
+      }
+      let rate = 1;
+      if (outTempo && nx._tempo) {
+        let r = outTempo / nx._tempo;
+        while (r > 1.5) r /= 2;                          // half/double-time equivalence
+        while (r < 0.67) r *= 2;
+        if (r >= 0.94 && r <= 1.06) rate = r;
+      }
+      Transport._rate = rate;                            // sources start tempo-matched
       Transport.seek(joinT);
       this._joinT = joinT;                               // ⟟ marker in the seek bar
       if (!Transport.playing) await Transport.toggle();
+      if (rate !== 1)                                    // glide to native after the entry
+        setTimeout(() => Transport.easeRateTo(1, 4), this.FADEIN * 1000);
       this.showNext();
       if (this.on) this.pick();                          // queue the following one
     } finally { this._advancing = false; this._fading = false; }
@@ -1648,6 +1681,7 @@ const Transport = {
   analysers: {}, sceneMode: false, _td: null, _fd: null,
   gainNodes: {}, _mode: null,           // per-stem GainNodes + "full"|"components"
   masterVol: 1,                         // overall tab volume (header dial)
+  _rate: 1,                             // playback rate (radio beat-matching)
 
   setMaster(v) { this.masterVol = v; if (this.master) this.master.gain.value = v; },
   rowVol(id) { const r = S.rows.find(x => x.track.id === id); return r ? (r.vol ?? 1) : 1; },
@@ -1667,6 +1701,7 @@ const Transport = {
   },
   reset() {
     this.stopSources(); this.playing = false; this.offset = 0;
+    this._rate = 1;                           // rate-matching never outlives a song switch
     this._bufGen = (this._bufGen || 0) + 1;   // in-flight decodes may not repopulate
     this.buffers.clear(); this.loading.clear();
     els.play.textContent = "▶ play"; els.play.classList.remove("on");
@@ -1741,6 +1776,29 @@ const Transport = {
     this.loading.set(id, p); return p;
   },
 
+  // Ease all live sources' playbackRate to `target` over `secs` (radio
+  // beat-matching: enter at the outgoing tempo, glide back to native).
+  easeRateTo(target, secs) {
+    const r0 = this._rate;
+    this._rate = target;                      // restarts mid-ramp pick up the target
+    if (!this.playing || !this.sources.length || Math.abs(r0 - target) < 1e-4) return;
+    const ac = this.ac, t0 = ac.currentTime, anchor = this.startedAt;
+    for (const s of this.sources) {
+      try {
+        s.playbackRate.cancelScheduledValues(t0);
+        s.playbackRate.setValueAtTime(r0, t0);
+        s.playbackRate.linearRampToValueAtTime(target, t0 + secs);
+      } catch {}
+    }
+    // the transport clock assumes rate 1; once the ramp lands, fold the real
+    // media-position drift (r0 since source start + the linear ramp) back in
+    const t1 = Math.max(0, t0 - anchor);
+    setTimeout(() => {
+      if (!this.playing || this.startedAt !== anchor) return;   // sought/restarted since
+      this.offset += (r0 - 1) * t1 + secs * ((r0 + target) / 2 - 1);
+    }, secs * 1000);
+  },
+
   curTime() {
     // While (re)starting sources we await buffer decode; freeze at `offset` so the
     // playhead/lyrics don't run ahead of audio that hasn't actually started yet.
@@ -1776,6 +1834,7 @@ const Transport = {
       const started = new Set();
       const attach = (id, buf, audible) => {       // instrument: analyser → gain → master
         const src = this.ac.createBufferSource(); src.buffer = buf;
+        src.playbackRate.value = this._rate;
         const an = this.ac.createAnalyser(); an.fftSize = 2048; an.smoothingTimeConstant = 0.6;
         const g = this.ac.createGain();
         g.gain.value = (audible ? 1 : 0) * this.rowVol(id);
@@ -1795,7 +1854,7 @@ const Transport = {
         this.master.gain.value = this.masterVol;
       if (playFull) {
         const buf = bufs[0];
-        if (buf) { const s = this.ac.createBufferSource(); s.buffer = buf; s.connect(this.master); s.start(0, Math.min(off, buf.duration)); this.sources.push(s); }
+        if (buf) { const s = this.ac.createBufferSource(); s.buffer = buf; s.playbackRate.value = this._rate; s.connect(this.master); s.start(0, Math.min(off, buf.duration)); this.sources.push(s); }
       } else {
         audibleIds.forEach((id, i) => bufs[i] && attach(id, bufs[i], true));
       }
@@ -1823,6 +1882,7 @@ const Transport = {
     for (let i = 0; i < ids.length; i++) {
       const buf = bufs[i]; if (!buf) continue;
       const src = this.ac.createBufferSource(); src.buffer = buf;
+      src.playbackRate.value = this._rate;
       if (isFull) {
         src.connect(this.master);
       } else {                                        // per-stem gain so faders work live
