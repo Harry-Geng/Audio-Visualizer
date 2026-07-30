@@ -364,8 +364,10 @@ def download_track(query, target_s, tmpdir, search_n=SEARCH_N, max_tries=3):
     _cb = os.environ.get("AV_COOKIES_BROWSER")
     cookie_opt = {"cookiesfrombrowser": (_cb,)} if _cb else {}
 
+    # ignoreerrors: one dead/age-gated video in the search results must not kill
+    # the whole search — drop it and keep the other candidates.
     search_opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
-                   "skip_download": True, **cookie_opt}
+                   "skip_download": True, "ignoreerrors": True, **cookie_opt}
     with yt_dlp.YoutubeDL(search_opts) as ydl:
         info = ydl.extract_info(f"ytsearch{search_n}:{query}", download=False)
     entries = [e for e in (info.get("entries") or []) if e]
