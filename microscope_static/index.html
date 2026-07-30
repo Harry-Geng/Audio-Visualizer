@@ -10,29 +10,45 @@
 <div id="app">
   <header>
     <h1>♪ MICROSCOPE</h1>
-    <select id="song"></select>
-    <div class="seg" id="mode">
-      <button data-mode="wave" class="on">wave</button>
-      <button data-mode="spec">spectro</button>
-      <button data-mode="both">both</button>
+
+    <div class="songpick" id="songpick">
+      <input id="song-q" type="text" autocomplete="off" spellcheck="false"
+             placeholder="search songs…" title="type to find a song by artist or title">
+      <div id="song-drop" hidden></div>
+      <select id="song" hidden></select>
     </div>
-    <button id="play">play</button>
-    <div class="mastervol" title="master volume (whole tab)">
-      <span>vol</span>
-      <input id="master-vol" type="range" min="0" max="1.5" step="0.01" value="1">
+
+    <div class="hgrp">
+      <div class="seg" id="mode">
+        <button data-mode="wave" class="on">wave</button>
+        <button data-mode="spec">spectro</button>
+        <button data-mode="both">both</button>
+      </div>
     </div>
-    <button id="reset-sm" title="clear all solo/mute">reset s/m</button>
-    <button id="zoomout">－</button>
-    <button id="zoomin">＋</button>
-    <button id="fit">fit</button>
-    <button id="lock-btn" title="keep the playhead centered while playing (scroll lock)">center</button>
-    <button id="toggle-sub" title="hide/show sub-components (drum kit, bass registers)">hide sub</button>
-    <div class="comp-wrap">
-      <button id="comp-btn">components</button>
-      <div id="comp-panel" class="panel" hidden></div>
+
+    <div class="hgrp">
+      <button id="zoomout" title="zoom out">－</button>
+      <button id="zoomin" title="zoom in">＋</button>
+      <button id="fit" title="fit the whole song">fit</button>
+      <button id="lock-btn" title="keep the playhead centered while playing (scroll lock)">center</button>
     </div>
-    <div class="comp-wrap">
-      <button id="add-btn">add music</button>
+
+    <div class="hgrp">
+      <button id="reset-sm" title="clear all solo/mute">reset s/m</button>
+      <button id="toggle-sub" title="hide/show sub-components (drum kit, bass registers)">hide sub</button>
+      <div class="comp-wrap">
+        <button id="comp-btn">components</button>
+        <div id="comp-panel" class="panel" hidden></div>
+      </div>
+    </div>
+
+    <div class="hgrp">
+      <div class="mastervol" title="master volume (whole tab)">
+        <span>vol</span>
+        <input id="master-vol" type="range" min="0" max="1.5" step="0.01" value="1">
+      </div>
+      <div class="comp-wrap">
+        <button id="add-btn">add music</button>
       <div id="add-panel" class="panel" hidden>
         <div id="dropzone">drop an audio file here<br><span>mp3 · flac · wav · m4a</span></div>
         <div class="or">— or paste a link —</div>
@@ -46,16 +62,20 @@
           drum kit (DrumSep) <span>— real kick/snare/toms/hh/ride/crash, +~25s</span></label>
         <label class="hqvox"><input type="checkbox" id="six-stem">
           6-stem (Demucs 6s) <span>— adds guitar + piano (piano weak)</span></label>
-        <div class="hint">URL audio is lossy (~160 kbps). Files keep full quality.</div>
+          <div class="hint">URL audio is lossy (~160 kbps). Files keep full quality.</div>
+        </div>
       </div>
     </div>
-    <button id="scene-btn">visualizer</button>
-    <button id="lyrics-btn" title="synced lyrics (karaoke)">lyrics</button>
-    <button id="sim-btn" title="find moments across the library that sound like the current spot">similar</button>
-    <button id="gal-btn" title="galaxy map — every moment of every song as a starfield">map</button>
-    <button id="radio-btn" title="infinite radio — when a song ends, flow into the most similar moment elsewhere in the library">radio</button>
-    <button id="taste-btn" title="your musical taste, mapped — the sound families of your library">taste</button>
-    <div class="spacer"></div>
+
+    <nav class="hviews" title="views — one at a time, esc leaves any of them">
+      <button id="scene-btn">visualizer</button>
+      <button id="lyrics-btn" title="synced lyrics (karaoke)">lyrics</button>
+      <button id="sim-btn" title="find moments across the library that sound like the current spot">similar</button>
+      <button id="gal-btn" title="galaxy map — every moment of every song as a starfield">map</button>
+      <button id="radio-btn" title="infinite radio — when a song ends, flow into the most similar moment elsewhere in the library">radio</button>
+      <button id="taste-btn" title="your musical taste, mapped — the sound families of your library">taste</button>
+    </nav>
+
     <div class="readout" id="readout"></div>
   </header>
   <div id="jobs"></div>
@@ -135,7 +155,15 @@
 
   <div id="sim-panel">
     <div class="sim-head">
-      <span class="sim-h-title">similar moments</span>
+      <span class="sim-h-title">find moments</span>
+      <button id="sim-close" title="close">✕</button>
+    </div>
+    <div class="sim-tabs" id="sim-tabs">
+      <button data-t="moment" class="on" title="moments that sound like the current spot">moment</button>
+      <button data-t="text" title="search the library by description">describe</button>
+      <button data-t="hum" title="hum or sing a melody">hum</button>
+    </div>
+    <div class="sim-mode" data-m="moment">
       <select id="sim-facet" title="which aspect to match on">
         <option value="mix">whole sound</option>
         <option value="vocals">vocals</option>
@@ -145,13 +173,15 @@
         <option value="rhythm">rhythm feel</option>
         <option value="texture">texture</option>
       </select>
-      <button id="sim-refresh" title="search from the current playhead position">from here</button>
-      <button id="sim-close" title="close">✕</button>
+      <button id="sim-refresh" title="search from the current playhead position">from playhead</button>
     </div>
-    <div class="sim-search">
+    <div class="sim-mode" data-m="text" hidden>
       <input id="sim-q" type="text" placeholder="describe a sound… “dark moody bassline”">
       <button id="sim-q-go" title="search the library by description">go</button>
-      <button id="sim-hum" title="hum or sing a melody — find moments that sound like it">hum</button>
+    </div>
+    <div class="sim-mode" data-m="hum" hidden>
+      <button id="sim-hum" title="hum or sing a melody — find moments that sound like it">hum a melody</button>
+      <span class="sim-mode-hint">click, hum, click again · max 10s</span>
     </div>
     <div id="sim-seed"></div>
     <div id="sim-results"></div>

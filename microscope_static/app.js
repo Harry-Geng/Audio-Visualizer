@@ -34,13 +34,14 @@ const S = {
 
 const $ = s => document.querySelector(s);
 const els = {
-  song: $("#song"), mode: $("#mode"), play: $("#play"), fit: $("#fit"),
+  song: $("#song"), songQ: $("#song-q"), songDrop: $("#song-drop"),
+  mode: $("#mode"), fit: $("#fit"),
   zin: $("#zoomin"), zout: $("#zoomout"), lock: $("#lock-btn"),
   compBtn: $("#comp-btn"), compPanel: $("#comp-panel"),
   resetSm: $("#reset-sm"), toggleSub: $("#toggle-sub"), masterVol: $("#master-vol"),
   lyricsBtn: $("#lyrics-btn"), lyricsPanel: $("#lyrics-panel"),
   simBtn: $("#sim-btn"), simPanel: $("#sim-panel"), simFacet: $("#sim-facet"),
-  simRefresh: $("#sim-refresh"), simClose: $("#sim-close"),
+  simRefresh: $("#sim-refresh"), simClose: $("#sim-close"), simTabs: $("#sim-tabs"),
   simSeed: $("#sim-seed"), simResults: $("#sim-results"),
   simQ: $("#sim-q"), simQGo: $("#sim-q-go"),
   galBtn: $("#gal-btn"), galaxy: $("#galaxy"), galCanvas: $("#gal-canvas"),
@@ -84,6 +85,8 @@ async function init() {
   const songs = await fetch("/api/songs").then(r => r.json());
   els.song.innerHTML = songs.map(s => `<option value="${s.id}">${s.title}</option>`).join("");
   els.song.onchange = () => loadSong(els.song.value);
+  els.songQ.placeholder = `search ${songs.length} songs…`;
+  SongPicker.setup();
 
   // hosted preview: no server-side ingest, so hide "add music" + flag it as a demo
   fetch("/api/appinfo").then(r => r.json()).then(info => {
@@ -105,8 +108,7 @@ async function init() {
     S.rows.forEach(r => { r.cache = null; r.specCache = null; });
     requestRender(true);
   });
-  els.play.onclick = () => Transport.toggle();
-  els.resetSm.onclick = () => {                 // clear all solo/mute/volume → back to full mix
+  els.resetSm.onclick = () => {               // clear all solo/mute/volume → back to full mix
     S.rows.forEach(r => { r.solo = false; r.mute = false; r.vol = 1; });
     syncRowBtns(); Transport.refresh();
   };
@@ -127,6 +129,8 @@ async function init() {
   els.simFacet.onchange = () => { Similar.facet = els.simFacet.value; Similar.find(); };
   els.simQGo.onclick = () => Similar.textSearch();
   els.simQ.onkeydown = e => { if (e.key === "Enter") Similar.textSearch(); };
+  els.simTabs.querySelectorAll("button").forEach(b =>
+    b.onclick = () => Similar.setMode(b.dataset.t));
   { const _h = document.querySelector("header"); if (_h) els.simPanel.style.top = _h.offsetHeight + "px"; }
   els.toggleSub.onclick = () => {               // collapse/expand ALL groups at once
     const groups = groupsWithChildren();
@@ -167,8 +171,121 @@ async function refreshSongs(selectId) {
   const cur = els.song.value;
   els.song.innerHTML = songs.map(s => `<option value="${s.id}">${s.title}</option>`).join("");
   els.song.value = selectId || cur;
+  els.songQ.placeholder = `search ${songs.length} songs…`;
+  SongPicker.sync();
   if (selectId) loadSong(selectId);
 }
+
+// ==========================================================================
+// SongPicker — type-to-find over the library. A native <select> of 900+ options
+// is unusable, so the select stays purely as the data model (every other module
+// reads els.song.value / .options / .selectedOptions) and this is a searchable
+// view of it. sync() re-derives the visible label from the model.
+// ==========================================================================
+const SongPicker = {
+  open: false, items: [], active: 0, MAX: 60,
+
+  setup() {
+    els.songQ.onfocus = () => { els.songQ.select(); this.show(""); };
+    els.songQ.oninput = () => this.show(els.songQ.value);
+    els.songQ.onkeydown = e => this.key(e);
+    // blur fires before a click on a row lands, so rows commit on mousedown and
+    // this only has to clean up an abandoned query
+    els.songQ.onblur = () => this.hide();
+    this.sync();
+  },
+
+  sync() {
+    if (this.open) return;                        // don't stomp what's being typed
+    const t = els.song.selectedOptions[0]?.textContent || "";
+    els.songQ.value = t;
+    els.songQ.title = t || "type to find a song by artist or title";
+  },
+
+  _norm(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(); },
+
+  // every whitespace-separated token must appear somewhere in the title; rank by
+  // how early they hit (so "sza" beats a song merely featuring her) then brevity
+  match(q) {
+    const opts = [...els.song.options];
+    if (!q.trim()) return opts.slice(0, this.MAX);
+    const toks = this._norm(q).split(" ").filter(Boolean);
+    const hits = [];
+    for (const o of opts) {
+      const hay = this._norm(o.textContent);
+      let score = 0, ok = true;
+      for (const t of toks) {
+        const i = hay.indexOf(t);
+        if (i < 0) { ok = false; break; }
+        score += i;
+      }
+      if (ok) hits.push({ o, score });
+    }
+    hits.sort((a, b) => a.score - b.score || a.o.textContent.length - b.o.textContent.length);
+    return hits.slice(0, this.MAX).map(h => h.o);
+  },
+
+  show(q) {
+    this.items = this.match(q);
+    this.active = 0;
+    const cur = els.song.value;
+    els.songDrop.innerHTML = "";
+    if (!this.items.length) {
+      els.songDrop.innerHTML = `<div class="song-none">nothing matches “${escapeHtml(q)}”</div>`;
+    } else {
+      this.items.forEach((o, i) => {
+        const d = document.createElement("div");
+        d.className = "song-opt" + (o.value === cur ? " cur" : "") + (i ? "" : " active");
+        d.textContent = o.textContent;
+        d.onmousedown = ev => { ev.preventDefault(); this.pick(i); };
+        els.songDrop.appendChild(d);
+      });
+    }
+    els.songDrop.hidden = false;
+    this.open = true;
+  },
+
+  hide() {
+    if (!this.open) return;
+    this.open = false;
+    els.songDrop.hidden = true;
+    this.sync();                                  // discard an abandoned query
+  },
+
+  setActive(i) {
+    const rows = [...els.songDrop.children];
+    if (!rows.length || !this.items.length) return;
+    this.active = (i + rows.length) % rows.length;
+    rows.forEach((r, n) => r.classList.toggle("active", n === this.active));
+    rows[this.active].scrollIntoView({ block: "nearest" });
+  },
+
+  key(e) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      this.open ? this.setActive(this.active + 1) : this.show(els.songQ.value);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault(); this.setActive(this.active - 1);
+    } else if (e.key === "Enter") {
+      e.preventDefault(); this.pick(this.active);
+    } else if (e.key === "Escape") {
+      e.preventDefault(); this.hide(); els.songQ.blur();
+    }
+  },
+
+  pick(i) {
+    const o = this.items[i];
+    if (!o) return;
+    this.open = false;
+    els.songDrop.hidden = true;
+    els.songQ.blur();
+    if (o.value !== S.songId) {
+      els.song.value = o.value;
+      loadSong(o.value);
+    }
+    this.sync();
+  },
+};
 
 let _loadGen = 0;        // overlapping loads: only the newest response may land
 let _lastGoodSong = null;
@@ -188,11 +305,13 @@ async function loadSong(id) {
     console.warn("song failed to load:", id);
     S.songId = _lastGoodSong;
     if (_lastGoodSong) els.song.value = _lastGoodSong;
+    SongPicker.sync();
     return;
   }
   _lastGoodSong = id;
   S.meta = meta;
   document.title = `${id} — Microscope`;
+  SongPicker.sync();               // covers every programmatic switch (radio, map, taste…)
 
   const f = S.meta.features || {};
   const keyName = (f.key != null && f.mode != null) ? keyLabel(f.key, f.mode) : "";
@@ -843,8 +962,18 @@ const TBar = {
 // any result, which loads that song and plays from the matching moment.
 // ==========================================================================
 const Similar = {
-  visible: false, facet: "mix", _poll: null, _req: 0,
+  visible: false, facet: "mix", mode: "moment", _poll: null, _req: 0,
   _prev: null, _prevBtn: null, _prevCard: null,   // inline preview player state
+
+  // moment / describe / hum are three different queries into the same result
+  // list — only the active one's controls are on screen. Switching tabs never
+  // discards results; each mode searches on its own explicit action.
+  setMode(m) {
+    this.mode = m;
+    els.simTabs.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.t === m));
+    els.simPanel.querySelectorAll(".sim-mode").forEach(d => { d.hidden = d.dataset.m !== m; });
+    if (m === "text") els.simQ.focus();
+  },
 
   toggle() {
     this.visible = !this.visible;
@@ -1400,6 +1529,7 @@ const Hum = {
     rec.start();
     this.recording = true;
     els.simHum.classList.add("rec");
+    els.simHum.textContent = "stop";
     els.simHum.title = "recording — click to stop (max 10s)";
     this._timer = setTimeout(() => this.stop(), this.MAX_S * 1000);
   },
@@ -1408,6 +1538,7 @@ const Hum = {
     clearTimeout(this._timer);
     this.recording = false;
     els.simHum.classList.remove("rec");
+    els.simHum.textContent = "hum a melody";
     els.simHum.title = this.TITLE;
     if (this._rec && this._rec.state !== "inactive") this._rec.stop();   // → onstop → _finish
   },
@@ -1932,7 +2063,6 @@ const Transport = {
     }
     this._bufGen = (this._bufGen || 0) + 1;   // in-flight decodes may not repopulate
     this.buffers.clear(); this.loading.clear();
-    els.play.textContent = "play"; els.play.classList.remove("on");
   },
 
   // Hierarchical solo/mute over the stem tree. Returns the leaf buffers to
@@ -2249,13 +2379,11 @@ const Transport = {
     // check re-pauses on the next frame and the button appears dead
     if (S.meta && this.offset >= S.meta.duration - 0.05) this.offset = 0;
     this.startedAt = this.ac.currentTime; this.playing = true;
-    els.play.textContent = "pause"; els.play.classList.add("on");
     await this.startSources();
   },
   pause() {
     if (typeof Radio !== "undefined") Radio.cancelFade();
     this.offset = this.curTime(); this.stopSources(); this.playing = false;
-    els.play.textContent = "play"; els.play.classList.remove("on");
   },
   seek(t) {
     this.offset = clamp(t, 0, S.meta.duration - 0.01);
