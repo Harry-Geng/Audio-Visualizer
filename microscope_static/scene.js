@@ -794,11 +794,11 @@ const Scene = {
     // The outer wall, dropped from the rim to the floor. Without it the sheet is
     // a membrane floating over an unrelated ellipse; with it the whole thing is
     // one solid vessel, which is most of what sells the space as 3D.
-    const rim = rows[0], floor = new Array(B.SEG + 2);
-    for (let j = 0; j <= B.SEG + 1; j++) {
-      const a = a0 + j / B.SEG * Math.PI * 2;
-      floor[j] = proj([Math.cos(a) * rim.R, B.BASE_Y, Math.sin(a) * rim.R]);
-    }
+    const rim = rows[0];
+    // the rim's height at an ARBITRARY angle, so the wall can be sampled on its own
+    // grid rather than the ring grid (ring 0 of the loop above, solved for any a)
+    const rimH = a => rim.h * (1 + (Math.sin(a * 3 + B.ripple * 1.3) * 0.5
+                                  + Math.sin(a * 5 - B.ripple * 0.8) * 0.5) * 0.13 * rim.e);
 
     // Split the sheet into wedges and paint them far-to-near — a plain painter's
     // sort, correct at any camera angle. Brightness is deliberately uniform
@@ -813,50 +813,27 @@ const Scene = {
     for (let k = 0; k < B.WEDGES; k++) {
       const jF = k * span, jT = jF + span, jM = jF + (span >> 1);
       for (let i = 0; i < B.RINGS - 1; i++)
-        quads.push({ i, jF, jT, d: (rows[i].row[jM].z + rows[i + 1].row[jM].z) * 0.5, wall: false });
-    }
-    // Backface-cull the wall. It's a single-sided band at the outer radius whose
-    // normal is radial, so the half with sin(a + yaw) > 0 faces away and is never
-    // visible — the sheet's outer edge IS the rim, so you can't see the inside of
-    // it. Drawn anyway, those quads go nearly edge-on at the sides where one depth
-    // key per quad mis-sorts, and they punched dark wedges through the sheet. The
-    // wall keys off its TOP edge unbiased; averaging in the floor point pushed the
-    // near wall behind the sheet, which is what made the rim look see-through.
-    // The wall is culled per SEGMENT rather than per wedge. A wedge straddling the
-    // boundary is part back-facing, so it has to be dropped whole — and at 22.5
-    // degrees that left a visible notch in the silhouette. One segment is 3.75
-    // degrees, where the wall is edge-on and the cut cannot be seen.
-    for (let j = 0; j < B.SEG; j++) {
-      const aF = a0 + j / B.SEG * Math.PI * 2, aT = a0 + (j + 1) / B.SEG * Math.PI * 2;
-      if (Math.sin(aF + yawT) < 0 && Math.sin(aT + yawT) < 0)
-        quads.push({ i: 0, jF: j, jT: j + 1, d: rim.row[j].z, wall: true });
+        quads.push({ i, jF, jT, d: (rows[i].row[jM].z + rows[i + 1].row[jM].z) * 0.5 });
     }
     quads.sort((p, q) => q.d - p.d);                 // farthest first
 
     for (const qd of quads) {
-      const A = rows[qd.i];
-      let outer, inner, hue = 12, sat = 60, lineL = -1;
-      if (qd.wall) {
-        outer = rim.row; inner = floor;
-        ctx.fillStyle = `hsl(12,62%,${clamp(9 + rim.e * 16, 5, 30)}%)`;
-      } else {
-        const Bd = rows[qd.i + 1];
-        outer = A.row; inner = Bd.row;
-        // Light the surface by its own gradient. This MUST be dh/dr, not dh: one
-        // radial step is ~0.04 world units, so a raw height difference never
-        // leaves the midpoint and the sheet renders with no shading whatsoever —
-        // a flat coloured disc. tanh keeps a near-vertical wall from clipping.
-        const shade = clamp(0.42 + 0.58 * Math.tanh((Bd.h - A.h) / dr * 0.45), 0.12, 1);
-        const eAvg = (A.e + Bd.e) * 0.5;
-        hue = 12 + ((A.u + Bd.u) * 0.5) * 190;
-        sat = 58 + Math.min(40, eAvg * 48);
-        const fillL = clamp((12 + eAvg * 34) * (0.45 + shade), 4, 70);
-        ctx.fillStyle = `hsl(${hue},${sat}%,${fillL}%)`;
-        // Contour brightness is RELATIVE to the fill it sits on, and fades out
-        // with energy. A fixed floor meant that on a quiet or still surface the
-        // lines sat ~30% over a ~10% fill and became the whole picture.
-        if (eAvg > 0.07) lineL = clamp(fillL + 4 + eAvg * 20, 5, 82);
-      }
+      const A = rows[qd.i], Bd = rows[qd.i + 1];
+      const outer = A.row, inner = Bd.row;
+      // Light the surface by its own gradient. This MUST be dh/dr, not dh: one
+      // radial step is ~0.04 world units, so a raw height difference never
+      // leaves the midpoint and the sheet renders with no shading whatsoever —
+      // a flat coloured disc. tanh keeps a near-vertical wall from clipping.
+      const shade = clamp(0.42 + 0.58 * Math.tanh((Bd.h - A.h) / dr * 0.45), 0.12, 1);
+      const eAvg = (A.e + Bd.e) * 0.5;
+      const hue = 12 + ((A.u + Bd.u) * 0.5) * 190;
+      const sat = 58 + Math.min(40, eAvg * 48);
+      const fillL = clamp((12 + eAvg * 34) * (0.45 + shade), 4, 70);
+      ctx.fillStyle = `hsl(${hue},${sat}%,${fillL}%)`;
+      // Contour brightness is RELATIVE to the fill it sits on, and fades out
+      // with energy. A fixed floor meant that on a quiet or still surface the
+      // lines sat ~30% over a ~10% fill and became the whole picture.
+      const lineL = eAvg > 0.07 ? clamp(fillL + 4 + eAvg * 20, 5, 82) : -1;
       // Fills run one segment past the wedge so neighbours overlap. Two exactly
       // abutting antialiased paths leave a hairline gap along the shared edge,
       // which showed up as faint vertical lines down the wall. Same colour and
@@ -882,6 +859,35 @@ const Scene = {
         for (let j = qd.jF + 1; j <= jFill; j++) ctx.lineTo(outer[j].x, outer[j].y);
         ctx.stroke();
       }
+    }
+
+    // The outer wall: ONE polygon spanning exactly the camera-facing half, whose
+    // ends land on the true silhouette angles rather than on the nearest ring
+    // sample. Sampling it on the ring grid meant the end segment straddled the
+    // silhouette and had to be dropped whole, leaving a notch at each side.
+    //
+    // Drawn after the sheet with no depth key at all, which is sound here: the
+    // wall lives at the maximum radius on the near side, so it is the nearest
+    // geometry in frame. Anything inward is at a smaller radius and therefore
+    // farther on this side — even a tall ridge, since the radius term
+    // (dR*cos(pitch) ~ 0.84) outweighs the height term (dy*sin(pitch) ~ 0.5).
+    // Its away-facing half is culled: the band is single-sided, and the sheet's
+    // outer edge IS the rim, so its inside is never visible.
+    {
+      const aS = Math.PI - yawT, N = B.SEG >> 1;
+      ctx.fillStyle = `hsl(12,62%,${clamp(9 + rim.e * 16, 5, 30)}%)`;
+      ctx.beginPath();
+      for (let n = 0; n <= N; n++) {
+        const a = aS + n / N * Math.PI;
+        const p = proj([Math.cos(a) * rim.R, B.BASE_Y + rimH(a), Math.sin(a) * rim.R]);
+        n ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+      }
+      for (let n = N; n >= 0; n--) {
+        const a = aS + n / N * Math.PI;
+        const p = proj([Math.cos(a) * rim.R, B.BASE_Y, Math.sin(a) * rim.R]);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath(); ctx.fill();
     }
 
     // No separate crest highlight. Drawn as a full circle it showed through the
