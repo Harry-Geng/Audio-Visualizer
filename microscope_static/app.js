@@ -34,8 +34,10 @@ const S = {
 
 const $ = s => document.querySelector(s);
 const els = {
-  song: $("#song"), songQ: $("#song-q"), songDrop: $("#song-drop"),
-  mode: $("#mode"), fit: $("#fit"),
+  song: $("#song"), mode: $("#mode"), fit: $("#fit"),
+  plBtn: $("#pl-btn"), plBtnLabel: $("#pl-btn-label"), playlist: $("#playlist"),
+  plClose: $("#pl-close"), plQ: $("#pl-q"), plList: $("#pl-list"),
+  plCount: $("#pl-count"), plShuffle: $("#pl-shuffle"), plAutonext: $("#pl-autonext"),
   zin: $("#zoomin"), zout: $("#zoomout"), lock: $("#lock-btn"),
   compBtn: $("#comp-btn"), compPanel: $("#comp-panel"),
   resetSm: $("#reset-sm"), toggleSub: $("#toggle-sub"), masterVol: $("#master-vol"),
@@ -85,8 +87,7 @@ async function init() {
   const songs = await fetch("/api/songs").then(r => r.json());
   els.song.innerHTML = songs.map(s => `<option value="${s.id}">${s.title}</option>`).join("");
   els.song.onchange = () => loadSong(els.song.value);
-  els.songQ.placeholder = `search ${songs.length} songs…`;
-  SongPicker.setup();
+  Playlist.setup();
 
   // hosted preview: no server-side ingest, so hide "add music" + flag it as a demo
   fetch("/api/appinfo").then(r => r.json()).then(info => {
@@ -171,119 +172,167 @@ async function refreshSongs(selectId) {
   const cur = els.song.value;
   els.song.innerHTML = songs.map(s => `<option value="${s.id}">${s.title}</option>`).join("");
   els.song.value = selectId || cur;
-  els.songQ.placeholder = `search ${songs.length} songs…`;
-  SongPicker.sync();
+  Playlist.rebuild();
   if (selectId) loadSong(selectId);
 }
 
 // ==========================================================================
-// SongPicker — type-to-find over the library. A native <select> of 900+ options
-// is unusable, so the select stays purely as the data model (every other module
-// reads els.song.value / .options / .selectedOptions) and this is a searchable
-// view of it. sync() re-derives the visible label from the model.
+// Playlist — the library as a browsable queue in a side dock. The <select
+// id="song"> stays as the data model (every other module reads els.song.value /
+// .options), and this renders it: search, click to play, shuffle, and auto-next.
+// A native <select> of 950 options was unbrowsable, and the dropdown that
+// replaced it silently truncated the list, so neither could reach song 900.
 // ==========================================================================
-const SongPicker = {
-  open: false, items: [], active: 0, MAX: 60,
+const Playlist = {
+  visible: false, ids: [], titles: [], order: [], pos: -1,
+  shuffle: false, autonext: true, _q: "", _advancing: false,
 
   setup() {
-    els.songQ.onfocus = () => { els.songQ.select(); this.show(""); };
-    els.songQ.oninput = () => this.show(els.songQ.value);
-    els.songQ.onkeydown = e => this.key(e);
-    // blur fires before a click on a row lands, so rows commit on mousedown and
-    // this only has to clean up an abandoned query
-    els.songQ.onblur = () => this.hide();
-    this.sync();
-  },
-
-  sync() {
-    if (this.open) return;                        // don't stomp what's being typed
-    const t = els.song.selectedOptions[0]?.textContent || "";
-    els.songQ.value = t;
-    els.songQ.title = t || "type to find a song by artist or title";
-  },
-
-  _norm(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(); },
-
-  // every whitespace-separated token must appear somewhere in the title; rank by
-  // how early they hit (so "sza" beats a song merely featuring her) then brevity
-  match(q) {
-    const opts = [...els.song.options];
-    if (!q.trim()) return opts.slice(0, this.MAX);
-    const toks = this._norm(q).split(" ").filter(Boolean);
-    const hits = [];
-    for (const o of opts) {
-      const hay = this._norm(o.textContent);
-      let score = 0, ok = true;
-      for (const t of toks) {
-        const i = hay.indexOf(t);
-        if (i < 0) { ok = false; break; }
-        score += i;
+    els.plBtn.onclick = () => this.toggle();
+    els.plClose.onclick = () => this.close();
+    els.plQ.oninput = () => { this._q = els.plQ.value; this.render(); };
+    els.plQ.onkeydown = e => {
+      if (e.key === "Enter") {                    // enter plays the top hit
+        const first = els.plList.querySelector(".pl-row");
+        if (first) first.click();
       }
-      if (ok) hits.push({ o, score });
+    };
+    els.plShuffle.onclick = () => this.setShuffle(!this.shuffle);
+    els.plAutonext.onclick = () => {
+      this.autonext = !this.autonext;
+      els.plAutonext.classList.toggle("on", this.autonext);
+    };
+    this.rebuild();
+  },
+
+  // (re)read the model. Keeps the current song's queue position across rebuilds
+  // so adding music mid-listen doesn't lose your place.
+  rebuild() {
+    this.ids = [...els.song.options].map(o => o.value);
+    this.titles = [...els.song.options].map(o => o.textContent);
+    this.order = this.ids.map((_, i) => i);
+    if (this.shuffle) this._shuffleOrder();
+    this.sync();
+    if (this.visible) this.render();
+  },
+
+  _shuffleOrder() {
+    const o = this.order;
+    for (let i = o.length - 1; i > 0; i--) {      // Fisher-Yates
+      const j = Math.floor(Math.random() * (i + 1));
+      [o[i], o[j]] = [o[j], o[i]];
     }
-    hits.sort((a, b) => a.score - b.score || a.o.textContent.length - b.o.textContent.length);
-    return hits.slice(0, this.MAX).map(h => h.o);
+    // keep whatever is playing at the front, so "next" continues from here
+    const cur = this.ids.indexOf(els.song.value);
+    const at = o.indexOf(cur);
+    if (at > 0) { o.splice(at, 1); o.unshift(cur); }
   },
 
-  show(q) {
-    this.items = this.match(q);
-    this.active = 0;
-    const cur = els.song.value;
-    els.songDrop.innerHTML = "";
-    if (!this.items.length) {
-      els.songDrop.innerHTML = `<div class="song-none">nothing matches “${escapeHtml(q)}”</div>`;
-    } else {
-      this.items.forEach((o, i) => {
-        const d = document.createElement("div");
-        d.className = "song-opt" + (o.value === cur ? " cur" : "") + (i ? "" : " active");
-        d.textContent = o.textContent;
-        d.onmousedown = ev => { ev.preventDefault(); this.pick(i); };
-        els.songDrop.appendChild(d);
-      });
-    }
-    els.songDrop.hidden = false;
-    this.open = true;
-  },
-
-  hide() {
-    if (!this.open) return;
-    this.open = false;
-    els.songDrop.hidden = true;
-    this.sync();                                  // discard an abandoned query
-  },
-
-  setActive(i) {
-    const rows = [...els.songDrop.children];
-    if (!rows.length || !this.items.length) return;
-    this.active = (i + rows.length) % rows.length;
-    rows.forEach((r, n) => r.classList.toggle("active", n === this.active));
-    rows[this.active].scrollIntoView({ block: "nearest" });
-  },
-
-  key(e) {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      this.open ? this.setActive(this.active + 1) : this.show(els.songQ.value);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault(); this.setActive(this.active - 1);
-    } else if (e.key === "Enter") {
-      e.preventDefault(); this.pick(this.active);
-    } else if (e.key === "Escape") {
-      e.preventDefault(); this.hide(); els.songQ.blur();
-    }
-  },
-
-  pick(i) {
-    const o = this.items[i];
-    if (!o) return;
-    this.open = false;
-    els.songDrop.hidden = true;
-    els.songQ.blur();
-    if (o.value !== S.songId) {
-      els.song.value = o.value;
-      loadSong(o.value);
+  setShuffle(on) {
+    this.shuffle = on;
+    els.plShuffle.classList.toggle("on", on);
+    this.order = this.ids.map((_, i) => i);
+    if (on) {
+      this._shuffleOrder();
+      this.playIndex(this.order[Math.min(1, this.order.length - 1)]);   // jump straight in
     }
     this.sync();
+  },
+
+  toggle() { this.visible ? this.close() : this.open(); },
+  open() {
+    this.visible = true;
+    document.body.classList.add("pl-on");
+    els.plBtn.classList.add("on");
+    this.render();
+    els.plQ.focus(); els.plQ.select();
+    this.scrollToCurrent();
+  },
+  close() {
+    this.visible = false;
+    document.body.classList.remove("pl-on");
+    els.plBtn.classList.remove("on");
+  },
+
+  // header label + row highlight follow whatever the model points at
+  sync() {
+    const t = els.song.selectedOptions[0]?.textContent || "…";
+    els.plBtnLabel.textContent = t;
+    els.plBtn.title = t + " — click to browse your library (L)";
+    els.plCount.textContent = this.ids.length ? `${this.ids.length} songs` : "";
+    if (!this.visible) return;
+    const cur = els.song.value;
+    for (const row of els.plList.children)
+      row.classList.toggle("cur", row.dataset.id === cur);
+  },
+
+  _matches() {
+    const q = this._q.trim().toLowerCase();
+    if (!q) return this.order;
+    const toks = q.split(/\s+/);
+    return this.order.filter(i => {
+      const hay = this.titles[i].toLowerCase();
+      return toks.every(t => hay.includes(t));
+    });
+  },
+
+  // Renders every match — no cap. 950 rows is well within what the DOM handles,
+  // and a cap is exactly what made the old dropdown unable to scroll to the end.
+  render() {
+    const list = this._matches(), cur = els.song.value;
+    els.plList.innerHTML = "";
+    if (!list.length) {
+      els.plList.innerHTML = `<div class="pl-empty">nothing matches “${escapeHtml(this._q)}”</div>`;
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    list.forEach((idx, n) => {
+      const row = document.createElement("div");
+      row.className = "pl-row" + (this.ids[idx] === cur ? " cur" : "");
+      row.dataset.id = this.ids[idx];
+      const num = document.createElement("span"); num.className = "n"; num.textContent = n + 1;
+      const t = document.createElement("span"); t.className = "t"; t.textContent = this.titles[idx];
+      row.append(num, t);
+      row.onclick = () => this.playIndex(idx);
+      frag.appendChild(row);
+    });
+    els.plList.appendChild(frag);
+  },
+
+  scrollToCurrent() {
+    const row = els.plList.querySelector(".pl-row.cur");
+    if (row) row.scrollIntoView({ block: "center" });
+  },
+
+  async playIndex(idx) {
+    const id = this.ids[idx];
+    if (!id) return;
+    this.pos = this.order.indexOf(idx);
+    if (id !== S.songId) {
+      els.song.value = id;
+      await loadSong(id);
+      if (S.songId !== id) return;                // load refused it
+    }
+    Transport.seek(0);
+    if (!Transport.playing) await Transport.toggle();
+    this.sync();
+  },
+
+  // end-of-song advance. Radio owns the handoff when it's on, so this stays out
+  // of its way; _advancing guards the async gap, since tick() keeps firing while
+  // the next song's metadata is still in flight.
+  async next() {
+    if (this._advancing || !this.order.length) return;
+    this._advancing = true;
+    try {
+      // S.songId, not els.song.value: playIndex() writes the select before it
+      // awaits the load, so reading the select mid-load resolves to the song
+      // that is still arriving and "next" would restart it instead of advancing
+      const cur = this.ids.indexOf(S.songId);
+      const at = this.order.indexOf(cur);
+      const nxt = this.order[(at + 1 + this.order.length) % this.order.length];
+      await this.playIndex(nxt);
+    } finally { this._advancing = false; }
   },
 };
 
@@ -305,13 +354,13 @@ async function loadSong(id) {
     console.warn("song failed to load:", id);
     S.songId = _lastGoodSong;
     if (_lastGoodSong) els.song.value = _lastGoodSong;
-    SongPicker.sync();
+    Playlist.sync();
     return;
   }
   _lastGoodSong = id;
   S.meta = meta;
   document.title = `${id} — Microscope`;
-  SongPicker.sync();               // covers every programmatic switch (radio, map, taste…)
+  Playlist.sync();                 // covers every programmatic switch (radio, map, taste…)
 
   const f = S.meta.features || {};
   const keyName = (f.key != null && f.mode != null) ? keyLabel(f.key, f.mode) : "";
@@ -741,12 +790,15 @@ function setupInteractions() {
       if (Lyrics.visible) Lyrics.toggle();
       if (Galaxy.visible) Galaxy.toggle();
       if (Taste.visible) Taste.toggle();
+      if (Playlist.visible) Playlist.close();
       if (e.target.blur) e.target.blur();
       return;
     }
     if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+    if (e.key === "l" || e.key === "L") { Playlist.toggle(); return; }
     if (!S.meta) return;                      // empty library / first song still loading
     if (e.code === "Space") { e.preventDefault(); Transport.toggle(); }
+    else if (e.key === "n") Playlist.next();
     else if (e.key === "f") setView(0, S.meta.duration);
     else if (e.key === "=" || e.key === "+") zoomBy(0.5);
     else if (e.key === "-") zoomBy(2);
@@ -2437,7 +2489,11 @@ const Transport = {
       if (this.playing) {
         const t = this.curTime(), span = S.view.end - S.view.start;
         Radio.checkTick(t);
-        if (t >= S.meta.duration - 0.02 && !Radio.on) this.pause();
+        if (t >= S.meta.duration - 0.02 && !Radio.on) {
+          // radio owns the handoff when it's on; otherwise auto-next walks the queue
+          if (typeof Playlist !== "undefined" && Playlist.autonext) Playlist.next();
+          else this.pause();
+        }
         else if (S.lock)                                  // scroll lock: keep centered
           setView(t - span / 2, t + span / 2);
         else if (span < S.meta.duration * 0.9 && (t > S.view.end - span * 0.08 || t < S.view.start))

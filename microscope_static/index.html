@@ -11,12 +11,8 @@
   <header>
     <h1>♪ MICROSCOPE</h1>
 
-    <div class="songpick" id="songpick">
-      <input id="song-q" type="text" autocomplete="off" spellcheck="false"
-             placeholder="search songs…" title="type to find a song by artist or title">
-      <div id="song-drop" hidden></div>
-      <select id="song" hidden></select>
-    </div>
+    <button id="pl-btn" title="browse your library (L)"><span id="pl-btn-label">…</span></button>
+    <select id="song" hidden></select>
 
     <div class="hgrp">
       <div class="seg" id="mode">
@@ -152,6 +148,20 @@
       <button id="taste-close" title="exit taste view (esc)">✕</button>
     </div>
     <div id="taste-body"></div>
+  </div>
+
+  <div id="playlist">
+    <div class="pl-head">
+      <span class="pl-title">library</span>
+      <span id="pl-count"></span>
+      <button id="pl-close" title="close (esc)">✕</button>
+    </div>
+    <div class="pl-tools">
+      <input id="pl-q" type="text" placeholder="search…" autocomplete="off" spellcheck="false">
+      <button id="pl-shuffle" title="shuffle the queue and jump to a random track">shuffle</button>
+      <button id="pl-autonext" class="on" title="when a song ends, play the next one in the queue">auto-next</button>
+    </div>
+    <div id="pl-list"></div>
   </div>
 
   <div id="sim-panel">
