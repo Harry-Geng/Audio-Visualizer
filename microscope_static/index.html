@@ -16,46 +16,45 @@
       <button data-mode="spec">spectro</button>
       <button data-mode="both">both</button>
     </div>
-    <button id="play">▶ play</button>
+    <button id="play">play</button>
     <div class="mastervol" title="master volume (whole tab)">
-      <span>🔊</span>
+      <span>vol</span>
       <input id="master-vol" type="range" min="0" max="1.5" step="0.01" value="1">
     </div>
-    <button id="reset-sm" title="clear all solo/mute">↺ S/M</button>
+    <button id="reset-sm" title="clear all solo/mute">reset s/m</button>
     <button id="zoomout">－</button>
     <button id="zoomin">＋</button>
-    <button id="fit">⤢ fit</button>
-    <button id="lock-btn" title="keep the playhead centered while playing (scroll lock)">⊙ center</button>
-    <button id="toggle-sub" title="hide/show sub-components (drum kit, bass registers)">▾ hide sub</button>
+    <button id="fit">fit</button>
+    <button id="lock-btn" title="keep the playhead centered while playing (scroll lock)">center</button>
+    <button id="toggle-sub" title="hide/show sub-components (drum kit, bass registers)">hide sub</button>
     <div class="comp-wrap">
-      <button id="comp-btn">◫ components</button>
+      <button id="comp-btn">components</button>
       <div id="comp-panel" class="panel" hidden></div>
     </div>
     <div class="comp-wrap">
-      <button id="add-btn">＋ add music</button>
+      <button id="add-btn">add music</button>
       <div id="add-panel" class="panel" hidden>
-        <div id="dropzone">⤓ drop an audio file here<br><span>mp3 · flac · wav · m4a</span></div>
+        <div id="dropzone">drop an audio file here<br><span>mp3 · flac · wav · m4a</span></div>
         <div class="or">— or paste a link —</div>
         <div class="urlrow">
           <input id="url-input" type="text" placeholder="YouTube / SoundCloud URL">
           <button id="url-go">fetch</button>
         </div>
         <label class="hqvox"><input type="checkbox" id="hq-vocals" checked>
-          ✨ HQ vocals (BS-Roformer) <span>— cleaner + cascades drums/bass/other</span></label>
+          HQ vocals (BS-Roformer) <span>— cleaner + cascades drums/bass/other</span></label>
         <label class="hqvox"><input type="checkbox" id="drum-kit" checked>
-          🥁 drum kit (DrumSep) <span>— real kick/snare/toms/hh/ride/crash, +~25s</span></label>
+          drum kit (DrumSep) <span>— real kick/snare/toms/hh/ride/crash, +~25s</span></label>
         <label class="hqvox"><input type="checkbox" id="six-stem">
-          🎸 6-stem (Demucs 6s) <span>— adds guitar + piano (piano weak)</span></label>
+          6-stem (Demucs 6s) <span>— adds guitar + piano (piano weak)</span></label>
         <div class="hint">URL audio is lossy (~160 kbps). Files keep full quality.</div>
       </div>
     </div>
-    <button id="live-btn">● live</button>
-    <button id="scene-btn">✦ visualizer</button>
-    <button id="lyrics-btn" title="synced lyrics (karaoke)">☰ lyrics</button>
-    <button id="sim-btn" title="find moments across the library that sound like the current spot">✧ similar</button>
-    <button id="gal-btn" title="galaxy map — every moment of every song as a starfield">✹ map</button>
-    <button id="radio-btn" title="infinite radio — when a song ends, flow into the most similar moment elsewhere in the library">📻 radio</button>
-    <button id="taste-btn" title="your musical taste, mapped — the sound families of your library">◉ taste</button>
+    <button id="scene-btn">visualizer</button>
+    <button id="lyrics-btn" title="synced lyrics (karaoke)">lyrics</button>
+    <button id="sim-btn" title="find moments across the library that sound like the current spot">similar</button>
+    <button id="gal-btn" title="galaxy map — every moment of every song as a starfield">map</button>
+    <button id="radio-btn" title="infinite radio — when a song ends, flow into the most similar moment elsewhere in the library">radio</button>
+    <button id="taste-btn" title="your musical taste, mapped — the sound families of your library">taste</button>
     <div class="spacer"></div>
     <div class="readout" id="readout"></div>
   </header>
@@ -75,28 +74,7 @@
     </div>
   </div>
 
-  <div id="live-view" hidden>
-    <div class="live-bar">
-      <span>input:</span>
-      <select id="live-device"></select>
-      <button id="live-start">▶ start capture</button>
-      <button id="live-stop" hidden>■ stop</button>
-      <div class="live-meter"><div id="live-level"></div></div>
-      <div class="spacer"></div>
-      <button id="live-help-btn">? routing Spotify</button>
-    </div>
-    <div id="live-help" hidden>
-      <b>Route Spotify (or any app) into the visualizer:</b>
-      <ol>
-        <li>Open <b>Audio MIDI Setup</b> → create a <b>Multi-Output Device</b> with your speakers + <b>BlackHole 2ch</b> (so you still hear it).</li>
-        <li>macOS <b>Sound → Output</b> → select that Multi-Output Device.</li>
-        <li>Here, pick <b>BlackHole 2ch</b> as input and hit start.</li>
-      </ol>
-    </div>
-    <canvas id="live-canvas"></canvas>
-  </div>
-
-  <div id="drop-overlay" hidden><div>⤓ drop to analyze</div></div>
+  <div id="drop-overlay" hidden><div>drop to analyze</div></div>
 
   <div id="scene" hidden>
     <canvas id="scene-canvas"></canvas>
@@ -104,20 +82,20 @@
     <div id="eq-lanes"></div>
     <div id="scene-hud">
       <div class="styles" id="scene-styles">
-        <button data-s="stage" class="on">🎭 stage</button>
-        <button data-s="liquid">💧 liquid</button>
-        <button data-s="weather">🌦 weather</button>
-        <button data-s="drift">✨ drift</button>
-        <button data-s="mandala">🌀 mandala</button>
-        <button data-s="pitch">♪ pitch-roll</button>
+        <button data-s="stage" class="on">stage</button>
+        <button data-s="liquid">liquid</button>
+        <button data-s="weather">weather</button>
+        <button data-s="drift">drift</button>
+        <button data-s="mandala">mandala</button>
+        <button data-s="pitch">pitch-roll</button>
         <button data-s="constellation">orbs</button>
         <button data-s="field">field</button>
         <button data-s="roll">piano-roll</button>
         <button data-s="geometry">geometry</button>
-        <button data-s="eq">🎚 EQ</button>
+        <button data-s="eq">EQ</button>
       </div>
       <div id="scene-insts"></div>
-      <button id="eq-flat" title="flatten every band back to 0 dB">↺ flat</button>
+      <button id="eq-flat" title="flatten every band back to 0 dB">flat</button>
       <div class="scene-hint" id="scene-hint-def">drag = rotate · click an instrument chip = solo · <kbd>space</kbd> = play</div>
       <div class="scene-hint" id="scene-hint-eq">drag <b>LOW · MID · HIGH</b> to shape each stem · MID drags sideways · double-click a dot = reset · <kbd>space</kbd> = play</div>
     </div>
@@ -149,7 +127,7 @@
 
   <div id="taste" hidden>
     <div id="taste-hud">
-      <span id="taste-title">◉ your taste — the sound families of your library</span>
+      <span id="taste-title">your taste — the sound families of your library</span>
       <button id="taste-close" title="exit taste view (esc)">✕</button>
     </div>
     <div id="taste-body"></div>
@@ -157,7 +135,7 @@
 
   <div id="sim-panel">
     <div class="sim-head">
-      <span class="sim-h-title">✧ similar moments</span>
+      <span class="sim-h-title">similar moments</span>
       <select id="sim-facet" title="which aspect to match on">
         <option value="mix">whole sound</option>
         <option value="vocals">vocals</option>
@@ -167,13 +145,13 @@
         <option value="rhythm">rhythm feel</option>
         <option value="texture">texture</option>
       </select>
-      <button id="sim-refresh" title="search from the current playhead position">⟳ here</button>
+      <button id="sim-refresh" title="search from the current playhead position">from here</button>
       <button id="sim-close" title="close">✕</button>
     </div>
     <div class="sim-search">
-      <input id="sim-q" type="text" placeholder="⌕ describe a sound… “dark moody bassline”">
+      <input id="sim-q" type="text" placeholder="describe a sound… “dark moody bassline”">
       <button id="sim-q-go" title="search the library by description">go</button>
-      <button id="sim-hum" title="hum or sing a melody — find moments that sound like it">🎤</button>
+      <button id="sim-hum" title="hum or sing a melody — find moments that sound like it">hum</button>
     </div>
     <div id="sim-seed"></div>
     <div id="sim-results"></div>

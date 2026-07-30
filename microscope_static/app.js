@@ -56,9 +56,6 @@ const els = {
   addBtn: $("#add-btn"), addPanel: $("#add-panel"), dropzone: $("#dropzone"),
   urlInput: $("#url-input"), urlGo: $("#url-go"), jobs: $("#jobs"),
   dropOverlay: $("#drop-overlay"),
-  liveBtn: $("#live-btn"), liveView: $("#live-view"), liveDevice: $("#live-device"),
-  liveStart: $("#live-start"), liveStop: $("#live-stop"), liveLevel: $("#live-level"),
-  liveHelpBtn: $("#live-help-btn"), liveHelp: $("#live-help"), liveCanvas: $("#live-canvas"),
   eqLanes: $("#eq-lanes"), eqFlat: $("#eq-flat"),
 };
 const DPR = () => window.devicePixelRatio || 1;
@@ -97,7 +94,7 @@ async function init() {
     badge.id = "demo-badge";
     badge.href = "https://github.com/Harry-Geng/Audio-Visualizer";
     badge.target = "_blank"; badge.rel = "noopener";
-    badge.textContent = "◆ demo — run it locally for your own library";
+    badge.textContent = "demo — run it locally for your own library";
     const header = document.querySelector("header");
     if (header) header.appendChild(badge);
   }).catch(() => {});
@@ -156,11 +153,10 @@ async function init() {
     if (!e.target.closest(".comp-wrap")) els.compPanel.hidden = true;
   });
 
-  window.addEventListener("resize", debounce(() => { applyVisibility(); Live.resize(); }, 120));
+  window.addEventListener("resize", debounce(() => applyVisibility(), 120));
   setupInteractions();
   Transport.init();
   Ingest.setup();
-  Live.setup();
   EQ.setup();
   if (songs.length) loadSong(songs[0].id);
   else els.addPanel.hidden = false;     // no songs yet → invite an add
@@ -202,12 +198,12 @@ async function loadSong(id) {
   const keyName = (f.key != null && f.mode != null) ? keyLabel(f.key, f.mode) : "";
   const pb = S.meta.playback || {};
   let q = pb.full_quality
-    ? `♪ ${pb.channels === 2 ? "stereo" : "mono"} ${(pb.sr / 1000).toFixed(1)}k`
-    : `♪ 22k mono mix`;
+    ? `${pb.channels === 2 ? "stereo" : "mono"} ${(pb.sr / 1000).toFixed(1)}k`
+    : `22k mono mix`;
   if (pb.lossy) q += " (lossy src)";
-  if (pb.hq_vocals) q += " · ✨HQ vox";
-  if (pb.drum_kit) q += " · 🥁kit";
-  if (S.meta.tracks.some(t => t.id === "guitar" || t.id === "piano")) q += " · 🎸6-stem";
+  if (pb.hq_vocals) q += " · HQ vox";
+  if (pb.drum_kit) q += " · kit";
+  if (S.meta.tracks.some(t => t.id === "guitar" || t.id === "piano")) q += " · 6-stem";
   S._info = [f.tempo ? Math.round(f.tempo) + " bpm" : "", keyName, q].filter(Boolean).join(" · ");
 
   S.visible = new Set(S.meta.tracks.map(t => t.id));   // all on by default
@@ -247,7 +243,7 @@ function updateCarets() {
   }
   const groups = groupsWithChildren();
   const allCollapsed = groups.length && groups.every(g => S.collapsed.has(g));
-  els.toggleSub.textContent = allCollapsed ? "▸ show sub" : "▾ hide sub";
+  els.toggleSub.textContent = allCollapsed ? "show sub" : "hide sub";
   els.toggleSub.classList.toggle("on", allCollapsed);
   els.compPanel.querySelectorAll("input").forEach(cb => cb.checked = S.visible.has(cb.dataset.id));
 }
@@ -1280,7 +1276,7 @@ const Taste = {
   },
 
   render(d) {
-    els.tasteTitle.textContent = `◉ your taste — the sound families of ${d.n_songs} songs`;
+    els.tasteTitle.textContent = `your taste — the sound families of ${d.n_songs} songs`;
     els.tasteBody.innerHTML = "";
     const clusters = d.clusters || [];
     if (!clusters.length) { els.tasteBody.innerHTML = `<div class="taste-empty">no sound families yet</div>`; return; }
@@ -1426,7 +1422,7 @@ const Hum = {
     if (!Similar.visible) Similar.toggle();         // toggle kicks off find(); superseded below
     clearTimeout(Similar._poll);
     const req = ++Similar._req;                     // stale finds/searches may not render
-    els.simSeed.textContent = "🎤 hummed query";
+    els.simSeed.textContent = "hummed query";
     els.simResults.innerHTML = `<div class="sim-empty">analyzing your hum…</div>`;
 
     // decode the compressed recording, then mix to mono @48k via an offline
@@ -1936,7 +1932,7 @@ const Transport = {
     }
     this._bufGen = (this._bufGen || 0) + 1;   // in-flight decodes may not repopulate
     this.buffers.clear(); this.loading.clear();
-    els.play.textContent = "▶ play"; els.play.classList.remove("on");
+    els.play.textContent = "play"; els.play.classList.remove("on");
   },
 
   // Hierarchical solo/mute over the stem tree. Returns the leaf buffers to
@@ -2253,13 +2249,13 @@ const Transport = {
     // check re-pauses on the next frame and the button appears dead
     if (S.meta && this.offset >= S.meta.duration - 0.05) this.offset = 0;
     this.startedAt = this.ac.currentTime; this.playing = true;
-    els.play.textContent = "❚❚ pause"; els.play.classList.add("on");
+    els.play.textContent = "pause"; els.play.classList.add("on");
     await this.startSources();
   },
   pause() {
     if (typeof Radio !== "undefined") Radio.cancelFade();
     this.offset = this.curTime(); this.stopSources(); this.playing = false;
-    els.play.textContent = "▶ play"; els.play.classList.remove("on");
+    els.play.textContent = "play"; els.play.classList.remove("on");
   },
   seek(t) {
     this.offset = clamp(t, 0, S.meta.duration - 0.01);
@@ -2407,114 +2403,6 @@ const Ingest = {
       } else setTimeout(poll, 1500);
     };
     poll();
-  },
-};
-
-// ==========================================================================
-// Live — realtime loopback spectrogram + waveform (BlackHole etc.)
-// ==========================================================================
-const Live = {
-  on: false, ac: null, analyser: null, stream: null, raf: 0,
-  freq: null, time: null, specCanvas: null, sctx: null,
-
-  setup() {
-    els.liveBtn.onclick = () => this.toggle();
-    els.liveStart.onclick = () => this.start();
-    els.liveStop.onclick = () => this.stop();
-    els.liveHelpBtn.onclick = () => els.liveHelp.hidden = !els.liveHelp.hidden;
-  },
-  async toggle() {
-    this.on = !this.on;
-    document.body.classList.toggle("live", this.on);
-    els.liveView.hidden = !this.on;
-    els.liveBtn.classList.toggle("on", this.on);
-    if (this.on) { await this.listDevices(); this.resize(); }
-    // re-measure + redraw the stem view on exit: its canvases may have been built
-    // while hidden (display:none → 0-sized), e.g. switching songs in live mode.
-    else { this.stop(); requestAnimationFrame(() => { layout(); requestRender(true); }); }
-  },
-  async listDevices() {
-    try { await navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop())); } catch {}
-    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audioinput");
-    els.liveDevice.innerHTML = devs.map(d =>
-      `<option value="${d.deviceId}">${d.label || "input " + d.deviceId.slice(0, 6)}</option>`).join("");
-    const bh = devs.find(d => /blackhole/i.test(d.label));
-    if (bh) els.liveDevice.value = bh.deviceId;
-  },
-  async start() {
-    this.stop();
-    const id = els.liveDevice.value;
-    try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { deviceId: id ? { exact: id } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-      });
-    } catch (e) { alert("Could not open input: " + e.message); return; }
-    this.ac = new (window.AudioContext || window.webkitAudioContext)();
-    const src = this.ac.createMediaStreamSource(this.stream);
-    this.analyser = this.ac.createAnalyser();
-    this.analyser.fftSize = 4096; this.analyser.smoothingTimeConstant = 0.5;
-    src.connect(this.analyser);
-    this.freq = new Uint8Array(this.analyser.frequencyBinCount);
-    this.time = new Uint8Array(this.analyser.fftSize);
-    els.liveStart.hidden = true; els.liveStop.hidden = false;
-    this.resize();
-    this.loop();
-  },
-  stop() {
-    cancelAnimationFrame(this.raf);
-    if (this.stream) this.stream.getTracks().forEach(t => t.stop());
-    if (this.ac) this.ac.close();
-    this.stream = this.ac = this.analyser = null;
-    els.liveStart.hidden = false; els.liveStop.hidden = true;
-    els.liveLevel.style.width = "0%";
-  },
-  resize() {
-    if (!this.on) return;
-    const c = els.liveCanvas, dpr = DPR();
-    const r = c.getBoundingClientRect();
-    c.width = Math.max(1, Math.round(r.width * dpr));
-    c.height = Math.max(1, Math.round(r.height * dpr));
-    this.specCanvas = document.createElement("canvas");
-    this.specCanvas.width = c.width; this.specCanvas.height = Math.max(1, c.height - 120 * dpr);
-    this.sctx = this.specCanvas.getContext("2d");
-    this.sctx.fillStyle = "#000"; this.sctx.fillRect(0, 0, this.specCanvas.width, this.specCanvas.height);
-  },
-  loop() {
-    this.raf = requestAnimationFrame(() => this.loop());
-    if (!this.analyser) return;
-    this.analyser.getByteFrequencyData(this.freq);
-    this.analyser.getByteTimeDomainData(this.time);
-    const c = els.liveCanvas, ctx = c.getContext("2d"), W = c.width, H = c.height, dpr = DPR();
-    const sc = this.specCanvas, sH = sc.height, sW = sc.width;
-
-    // scroll spectrogram left by 2px, draw new column (log-frequency)
-    const step = Math.max(1, Math.round(2 * dpr));
-    this.sctx.drawImage(sc, -step, 0);
-    const bins = this.freq.length, nyq = (this.ac.sampleRate || 48000) / 2;
-    const fmin = 30, fmax = nyq;
-    for (let y = 0; y < sH; y++) {
-      const frac = 1 - y / sH;
-      const f = fmin * Math.pow(fmax / fmin, frac);
-      const bin = Math.min(bins - 1, Math.round(f / nyq * bins));
-      const v = this.freq[bin] / 255;
-      this.sctx.fillStyle = magmaCss(v);
-      this.sctx.fillRect(sW - step, y, step, 1);
-    }
-    ctx.drawImage(sc, 0, 0);
-
-    // waveform strip along the bottom
-    const wy = sH, wh = H - sH;
-    ctx.fillStyle = "#06070a"; ctx.fillRect(0, wy, W, wh);
-    ctx.strokeStyle = "#2ecc71"; ctx.lineWidth = 1.5 * dpr; ctx.beginPath();
-    const n = this.time.length;
-    let peak = 0;
-    for (let i = 0; i < n; i++) {
-      const v = (this.time[i] - 128) / 128; peak = Math.max(peak, Math.abs(v));
-      const x = i / n * W, yy = wy + wh / 2 - v * (wh / 2 - 4);
-      i ? ctx.lineTo(x, yy) : ctx.moveTo(x, yy);
-    }
-    ctx.stroke();
-    els.liveLevel.style.width = Math.min(100, peak * 140) + "%";
   },
 };
 

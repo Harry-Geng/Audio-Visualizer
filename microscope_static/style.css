@@ -11,7 +11,7 @@
 * { box-sizing: border-box; }
 
 /* the `hidden` attribute must always win over author display rules below
-   (e.g. #drop-overlay/#live-view set display:flex, which would otherwise
+   (e.g. #drop-overlay sets display:flex, which would otherwise
    override the browser's default [hidden]{display:none}) */
 [hidden] { display: none !important; }
 
@@ -94,17 +94,6 @@ button.on { background: #2a3550; border-color: #4a6; color: #fff; }
 .job .bar.determinate i { animation: none; margin-left: 0; transition: width .4s ease; }
 .job.done .bar, .job.error .bar { display: none; }
 @keyframes slide { 0%{margin-left:-30%} 100%{margin-left:100%} }
-
-/* live mode */
-#live-view { flex: 1; display: flex; flex-direction: column; min-height: 0; background: #06070a; }
-.live-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
-.live-bar select { max-width: 260px; }
-.live-meter { width: 120px; height: 8px; background: #232733; border-radius: 4px; overflow: hidden; }
-#live-level { height: 100%; width: 0%; background: linear-gradient(90deg,#2ecc71,#f1c40f,#e74c3c); transition: width .05s; }
-#live-help { padding: 12px 16px; color: var(--text); font-size: 12px; background: #0e1014; border-bottom: 1px solid var(--line); }
-#live-help ol { margin: 6px 0 0; padding-left: 20px; line-height: 1.7; color: var(--dim); }
-#live-canvas { flex: 1; width: 100%; min-height: 0; display: block; }
-body.live #scroll, body.live #ruler-wrap { display: none; }
 
 /* scene mode */
 #scene { flex: 1; position: relative; min-height: 0; background: #04050a; }
