@@ -85,7 +85,10 @@ const Scene = {
     c.addEventListener("pointermove", e => {
       if (!this.dragging) return;
       this.yaw += (e.clientX - this.lastX) * 0.01;
-      this.pitch = clamp(this.pitch + (e.clientY - this.lastY) * 0.005, -0.3, 1.1);
+      // views with a ground plane can't be dragged below it — past horizontal you
+      // end up looking at the underside of the sheet, which reads as a bug
+      const minPitch = this.style === "basswell" ? 0.06 : -0.3;
+      this.pitch = clamp(this.pitch + (e.clientY - this.lastY) * 0.005, minPitch, 1.1);
       this.lastX = e.clientX; this.lastY = e.clientY;
     });
     c.addEventListener("pointerup", () => this.dragging = false);
@@ -518,10 +521,16 @@ const Scene = {
     this.syncHUD();
   },
 
-  project(p, W, H) {
+  // pitchSign flips which way the camera sits relative to the ground plane.
+  // The default (+1) puts it BELOW: y2 subtracts z1·sin(pitch), so the far edge
+  // of a flat disc draws lower on screen than the near edge — you see the
+  // underside. Harmless for the free-floating views (orbs, roll, geometry) which
+  // have no ground, so their behaviour is left exactly as it was; anything with a
+  // floor should pass -1 to look down at it from above.
+  project(p, W, H, pitchSign = 1) {
     const yaw = this.yaw + this.autoYaw, cy = Math.cos(yaw), sy = Math.sin(yaw);
     const x = p[0] * cy - p[2] * sy, z1 = p[0] * sy + p[2] * cy, y = p[1];
-    const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);
+    const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch) * pitchSign;
     const y2 = y * cp - z1 * sp, z2 = y * sp + z1 * cp;
     const camD = 7, zz = z2 + camD, fl = H * 0.9 / Math.max(0.1, zz);
     return { x: W / 2 + x * fl, y: H / 2 - y2 * fl, scale: camD / Math.max(0.1, zz), z: zz };
@@ -668,7 +677,10 @@ const Scene = {
   // needs no depth sorting because everything composites as light.
   BW: {
     F_LO: 22, F_HI: 420,          // Hz mapped from the rim to the centre
-    RINGS: 72, SEG: 96,           // radial samples x angular samples of the sheet
+    // RINGS x WEDGES is the fill count and dominates frame cost (~5us per fill).
+    // SEG stays high independently: it sets silhouette smoothness, since every
+    // wedge's outer edge still follows SEG/WEDGES segments. WEDGES must divide SEG.
+    RINGS: 40, SEG: 96, WEDGES: 16,
     R_OUT: 2.45, R_IN: 0.05,      // world-space radii of the outer edge / centre
     HEIGHT: 1.25, BASE_Y: -0.5,   // BASE_Y drops the sheet so risen rims stay framed
     DB_LO: -76, DB_HI: -20,       // dB window: below LO is floor, above HI is full height
@@ -730,13 +742,9 @@ const Scene = {
     B.ripple += this.dt * (0.9 + mx * norm * 2.2);          // undulation phase
 
     // ---- geometry ----
-    // The angle array starts at -yaw so that j in [0, SEG/2] is exactly the half
-    // of the disc facing AWAY from the camera: depth works out to
-    // R·sin(a + yaw)·cos(pitch) + h·sin(pitch), so sin(a + yaw) > 0 is the far
-    // side. That split is what lets an opaque sheet paint in correct depth order
-    // (far half outward-in, then near half inward-out) without sorting anything.
     const pulse = 1 + f.beat * 0.035;
-    const a0 = -(this.yaw + this.autoYaw);
+    const a0 = 0;
+    const proj = p => this.project(p, W, H, -1);   // this view has a floor: look DOWN
     const rows = [];
     for (let i = 0; i < B.RINGS; i++) {
       const u = i / (B.RINGS - 1);
@@ -750,8 +758,7 @@ const Scene = {
         // sheet breathes instead of reading as a machined solid of revolution
         const w = Math.sin(a * 3 + B.ripple * 1.3 + i * 0.22) * 0.5
                 + Math.sin(a * 5 - B.ripple * 0.8 + i * 0.11) * 0.5;
-        row[j] = this.project([Math.cos(a) * R, B.BASE_Y + h * (1 + w * 0.22 * e),
-                               Math.sin(a) * R], W, H);
+        row[j] = proj([Math.cos(a) * R, B.BASE_Y + h * (1 + w * 0.22 * e), Math.sin(a) * R]);
       }
       rows.push({ row, e, u, R, h });
     }
@@ -770,7 +777,7 @@ const Scene = {
       ctx.beginPath();
       for (let j = 0; j <= B.SEG; j++) {
         const a = a0 + j / B.SEG * Math.PI * 2;
-        const p = this.project([Math.cos(a) * R, B.BASE_Y, Math.sin(a) * R], W, H);
+        const p = proj([Math.cos(a) * R, B.BASE_Y, Math.sin(a) * R]);
         j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
       }
       ctx.stroke();
@@ -781,27 +788,67 @@ const Scene = {
     // from the centre to the rim — no ring lines anywhere. Shading mixes the
     // frequency ramp (ember rim -> cyan centre) with the radial slope, so a rising
     // wall catches light and the surface reads as a lit solid rather than a stack.
-    const half = B.SEG >> 1;
-    const band = (i, jFrom, jTo) => {
-      const A = rows[i], Bd = rows[i + 1];
-      const slope = (Bd.h - A.h) * 2.2;             // >0 climbing toward the centre
-      const eAvg = (A.e + Bd.e) * 0.5;
-      const hue = 12 + ((A.u + Bd.u) * 0.5) * 190;
-      const shade = clamp(0.5 + slope, 0.18, 1.25);
-      const lum = clamp((16 + eAvg * 42) * shade, 6, 74);
-      const sat = 60 + Math.min(38, eAvg * 46);
-      const alpha = 0.72 + Math.min(0.28, eAvg * 0.4);
-      ctx.fillStyle = `hsla(${hue},${sat}%,${lum}%,${alpha})`;
+    // The outer wall, dropped from the rim to the floor. Without it the sheet is
+    // a membrane floating over an unrelated ellipse; with it the whole thing is
+    // one solid vessel, which is most of what sells the space as 3D.
+    const rim = rows[0], floor = new Array(B.SEG + 1);
+    for (let j = 0; j <= B.SEG; j++) {
+      const a = a0 + j / B.SEG * Math.PI * 2;
+      floor[j] = proj([Math.cos(a) * rim.R, B.BASE_Y, Math.sin(a) * rim.R]);
+    }
+
+    // Split the sheet into wedges and paint them far-to-near — a plain painter's
+    // sort. Doing depth per PATCH rather than per half-circle is what fixes two
+    // things at once: brightness now varies smoothly around the rim instead of
+    // showing a hard seam where two flat-shaded halves met, and the ordering is
+    // correct at any camera angle instead of relying on a hand-derived rule about
+    // which half is farther. ~1400 small fills, still trivially cheap.
+    const dr = (B.R_OUT - B.R_IN) / (B.RINGS - 1);
+    const span = B.SEG / B.WEDGES;
+    const quads = [];
+    for (let k = 0; k < B.WEDGES; k++) {
+      const jF = k * span, jT = jF + span, jM = jF + (span >> 1);
+      for (let i = 0; i < B.RINGS - 1; i++) {
+        const A = rows[i], Bd = rows[i + 1];
+        quads.push({ i, jF, jT,
+                     d: (A.row[jM].z + Bd.row[jM].z) * 0.5,
+                     s: (A.row[jM].scale + Bd.row[jM].scale) * 0.5, wall: false });
+      }
+      quads.push({ i: 0, jF, jT, d: (rim.row[jM].z + floor[jM].z) * 0.5 + 0.02,
+                   s: rim.row[jM].scale, wall: true });
+    }
+    quads.sort((p, q) => q.d - p.d);                 // farthest first
+
+    for (const qd of quads) {
+      const A = rows[qd.i];
+      // aerial perspective: project() hands back camD/depth, so scale IS the
+      // depth cue, already perspective-correct
+      // gentle range on purpose: fog is flat per wedge, so a steep curve would
+      // show the 22.5-degree facets as brightness steps around the rim
+      const fog = clamp(0.58 + (qd.s - 0.85) * 0.85, 0.5, 1.14);
+      let outer, inner;
+      if (qd.wall) {
+        outer = rim.row; inner = floor;
+        ctx.fillStyle = `hsl(14,55%,${clamp((7 + rim.e * 14) * fog, 3, 27)}%)`;
+      } else {
+        const Bd = rows[qd.i + 1];
+        outer = A.row; inner = Bd.row;
+        // Light the surface by its own gradient. This MUST be dh/dr, not dh: one
+        // radial step is ~0.04 world units, so a raw height difference never
+        // leaves the midpoint and the sheet renders with no shading whatsoever —
+        // a flat coloured disc. tanh keeps a near-vertical wall from clipping.
+        const shade = clamp(0.42 + 0.58 * Math.tanh((Bd.h - A.h) / dr * 0.45), 0.12, 1);
+        const eAvg = (A.e + Bd.e) * 0.5;
+        const hue = 12 + ((A.u + Bd.u) * 0.5) * 190;
+        const sat = 58 + Math.min(40, eAvg * 48);
+        ctx.fillStyle = `hsl(${hue},${sat}%,${clamp((12 + eAvg * 34) * (0.45 + shade) * fog, 4, 76)}%)`;
+      }
       ctx.beginPath();
-      ctx.moveTo(A.row[jFrom].x, A.row[jFrom].y);
-      for (let j = jFrom + 1; j <= jTo; j++) ctx.lineTo(A.row[j].x, A.row[j].y);
-      for (let j = jTo; j >= jFrom; j--) ctx.lineTo(Bd.row[j].x, Bd.row[j].y);
+      ctx.moveTo(outer[qd.jF].x, outer[qd.jF].y);
+      for (let j = qd.jF + 1; j <= qd.jT; j++) ctx.lineTo(outer[j].x, outer[j].y);
+      for (let j = qd.jT; j >= qd.jF; j--) ctx.lineTo(inner[j].x, inner[j].y);
       ctx.closePath(); ctx.fill();
-    };
-    // far half: the rim is the farthest thing on that side, so paint outward-in
-    for (let i = 0; i < B.RINGS - 1; i++) band(i, 0, half);
-    // near half: the centre is the farthest thing on this side, so paint inward-out
-    for (let i = B.RINGS - 2; i >= 0; i--) band(i, half, B.SEG);
+    }
 
     // glowing crest along the loudest radius — the eye's anchor for "the note".
     // Split at the same seam and drawn after the sheet, so the near half of the
@@ -843,7 +890,7 @@ const Scene = {
       const u = this._bwU(this.bassHz);
       const R = (B.R_OUT + (B.R_IN - B.R_OUT) * u) * pulse;
       const a = B.ripple * 0.55;
-      const p = this.project([Math.cos(a) * R, B.BASE_Y + rows[Math.round(u * (B.RINGS - 1))].h + 0.06, Math.sin(a) * R], W, H);
+      const p = proj([Math.cos(a) * R, B.BASE_Y + rows[Math.round(u * (B.RINGS - 1))].h + 0.06, Math.sin(a) * R]);
       const rr = Math.max(2.5, 6 * p.scale);
       const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rr * 3);
       g.addColorStop(0, "rgba(255,255,255,0.95)");
