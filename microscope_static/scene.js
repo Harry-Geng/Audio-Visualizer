@@ -513,6 +513,7 @@ const Scene = {
     else if (this.style === "constellation") this.renderConstellation(ctx, W, H, f);
     else if (this.style === "field") this.renderField(ctx, W, H, f);
     else if (this.style === "roll") this.renderRoll(ctx, W, H, f);
+    else if (this.style === "basswell") this.renderBassWell(ctx, W, H, f);
     else this.renderGeometry(ctx, W, H, f);
     this.syncHUD();
   },
@@ -656,6 +657,191 @@ const Scene = {
     this.drawVocals(ctx, W, H, f);
     this.drawBass(ctx, W, H, f);
     this.drawDrumKit(ctx, W, H, f);
+  },
+
+  // ---- bass well: the bass spectrum wrapped into a circle ----
+  // Radius carries frequency — the lowest sub sits on the outer rim, the top of
+  // the bass range at the centre — and each ring's energy lifts it off the
+  // floor. So WHERE the glowing ridge sits is the bass pitch and HOW TALL it
+  // stands is the level: a sub drop swells the rim, a walking line marches the
+  // ridge inward. Drawn as an additive polar wireframe (rings + spokes), which
+  // needs no depth sorting because everything composites as light.
+  BW: {
+    F_LO: 22, F_HI: 420,          // Hz mapped from the rim to the centre
+    RINGS: 44, SEG: 84, SPOKES: 24,
+    R_OUT: 2.45, R_IN: 0.22,      // world-space radii of the outermost/innermost ring
+    HEIGHT: 1.25, BASE_Y: -0.5,   // BASE_Y drops the disc so risen rings stay framed
+    DB_LO: -76, DB_HI: -20,       // dB window: below LO is floor, above HI is full height
+    mag: null, buf: null, peak: 0, ripple: 0,
+  },
+
+  // ring index (0 = rim) -> centre frequency, and the inverse
+  _bwFreq(u) { const B = this.BW; return B.F_LO * Math.pow(B.F_HI / B.F_LO, u); },
+  _bwU(hz) {
+    const B = this.BW;
+    return clamp(Math.log(hz / B.F_LO) / Math.log(B.F_HI / B.F_LO), 0, 1);
+  },
+
+  renderBassWell(ctx, W, H, f) {
+    const B = this.BW;
+    if (!B.mag || B.mag.length !== B.RINGS) B.mag = new Float32Array(B.RINGS);
+
+    // ---- sample the bass spectrum ----
+    const an = (Transport.tapAnalyser && Transport.tapAnalyser("bass", 8192))
+            || Transport.analysers.bass || Transport.analysers.full;
+    if (an) {
+      const bins = an.frequencyBinCount;
+      if (!B.buf || B.buf.length !== bins) B.buf = new Float32Array(bins);
+      // float dB, not byte: getByteFrequencyData squashes everything into
+      // 0.35..0.7 for real music, so the whole disc inflates and no ridge reads.
+      // A dB window turns the same data back into contrast.
+      an.getFloatFrequencyData(B.buf);
+      const sr = Transport.ac.sampleRate, nfft = an.fftSize, step = 1 / (B.RINGS - 1);
+      const span = B.DB_HI - B.DB_LO;
+      for (let i = 0; i < B.RINGS; i++) {
+        const u = i * step;
+        const lo = Math.max(1, Math.round(this._bwFreq(Math.max(0, u - step / 2)) * nfft / sr));
+        const hi = Math.max(lo + 1, Math.round(this._bwFreq(u + step / 2) * nfft / sr));
+        let db = -200;                              // peak-hold in the band: tonal bass
+        for (let b = lo; b < hi && b < bins; b++)   // reads as a ridge, not a smear
+          if (B.buf[b] > db) db = B.buf[b];
+        const e = clamp((db - B.DB_LO) / span, 0, 1);
+        B.mag[i] = B.mag[i] * 0.6 + e * 0.4;
+      }
+    }
+    // gentle auto-gain: lifts quiet passages, never inflates already-loud ones
+    let mx = 0, ridge = 0, ridgeI = 0;
+    for (let i = 0; i < B.RINGS; i++) {
+      if (B.mag[i] > mx) mx = B.mag[i];
+      if (B.mag[i] > ridge) { ridge = B.mag[i]; ridgeI = i; }
+    }
+    B.peak = Math.max(mx, B.peak * 0.994);
+    const norm = 1 / Math.max(0.55, B.peak);
+    B.ripple += this.dt * (0.9 + mx * norm * 2.2);          // undulation phase
+
+    // ---- geometry: ring i, angle j -> world point ----
+    const pulse = 1 + f.beat * 0.035;
+    const pts = [];                                          // [ring][seg] projected
+    for (let i = 0; i < B.RINGS; i++) {
+      const u = i / (B.RINGS - 1);
+      const e = clamp(B.mag[i] * norm, 0, 1.6);
+      const R = (B.R_OUT + (B.R_IN - B.R_OUT) * u) * pulse;
+      const h = Math.pow(e, 2.1) * B.HEIGHT;        // gamma: only real energy climbs
+      const row = new Array(B.SEG + 1);
+      for (let j = 0; j <= B.SEG; j++) {
+        const a = j / B.SEG * Math.PI * 2;
+        // two slow travelling waves, scaled by this ring's own energy, so the
+        // surface breathes instead of reading as perfect machined circles
+        const w = Math.sin(a * 3 + B.ripple * 1.3 + i * 0.22) * 0.5
+                + Math.sin(a * 5 - B.ripple * 0.8 + i * 0.11) * 0.5;
+        const hh = h * (1 + w * 0.22 * e);
+        row[j] = this.project([Math.cos(a) * R, B.BASE_Y + hh, Math.sin(a) * R], W, H);
+      }
+      pts.push({ row, e, u, R, h });
+    }
+
+    // ---- draw ----
+    ctx.fillStyle = "#04050a"; ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineJoin = "round";
+
+    // floor: the same rings flattened, as a faint ground plane to read height against
+    ctx.lineWidth = 1;
+    for (let i = 0; i < B.RINGS; i += 6) {
+      const R = (B.R_OUT + (B.R_IN - B.R_OUT) * (i / (B.RINGS - 1))) * pulse;
+      ctx.strokeStyle = "rgba(90,110,150,0.10)";
+      ctx.beginPath();
+      for (let j = 0; j <= B.SEG; j++) {
+        const a = j / B.SEG * Math.PI * 2;
+        const p = this.project([Math.cos(a) * R, B.BASE_Y, Math.sin(a) * R], W, H);
+        j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+
+    // spokes first (they sit under the rings and imply the surface between them)
+    for (let s = 0; s < B.SPOKES; s++) {
+      const j = Math.round(s / B.SPOKES * B.SEG);
+      ctx.strokeStyle = `rgba(120,150,210,${0.05 + 0.16 * clamp(mx * norm, 0, 1)})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i < B.RINGS; i++) {
+        const p = pts[i].row[j];
+        i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+
+    // rings, coloured by frequency: ember at the rim -> cyan at the centre
+    for (let i = 0; i < B.RINGS; i++) {
+      const { row, e, u } = pts[i];
+      const hue = 12 + u * 190;
+      const lum = 44 + Math.min(46, e * 46);
+      const alpha = 0.20 + Math.min(0.75, e * 0.9);
+      ctx.strokeStyle = `hsla(${hue},92%,${lum}%,${alpha})`;
+      ctx.lineWidth = 1 + Math.min(3.4, e * 3.4);
+      ctx.beginPath();
+      for (let j = 0; j <= B.SEG; j++) {
+        const p = row[j];
+        j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+
+    // the loudest ring gets a bloom — this is the eye's anchor for "the note"
+    if (ridge * norm > 0.15) {
+      const { row, u } = pts[ridgeI];
+      ctx.save();
+      ctx.shadowColor = `hsla(${12 + u * 190},100%,66%,0.95)`;
+      ctx.shadowBlur = 22;
+      ctx.strokeStyle = `hsla(${12 + u * 190},100%,78%,${Math.min(0.95, ridge * norm)})`;
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      for (let j = 0; j <= B.SEG; j++) {
+        const p = row[j];
+        j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // the detected fundamental as a bright travelling marker on its own radius.
+    // Gated to a plausible bass register: the autocorrelation detector octave-
+    // slips on dense low end, and a marker parked at the centre would read as
+    // "the bass is at 280 Hz" while the ridge plainly says otherwise.
+    if (this.bassHz > B.F_LO && this.bassHz < 220) {
+      const u = this._bwU(this.bassHz);
+      const R = (B.R_OUT + (B.R_IN - B.R_OUT) * u) * pulse;
+      const a = B.ripple * 0.55;
+      const p = this.project([Math.cos(a) * R, B.BASE_Y + pts[Math.round(u * (B.RINGS - 1))].h + 0.06, Math.sin(a) * R], W, H);
+      const rr = Math.max(2.5, 6 * p.scale);
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rr * 3);
+      g.addColorStop(0, "rgba(255,255,255,0.95)");
+      g.addColorStop(0.35, "rgba(180,220,255,0.5)");
+      g.addColorStop(1, "rgba(180,220,255,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(p.x, p.y, rr * 3, 0, Math.PI * 2); ctx.fill();
+    }
+
+    ctx.globalCompositeOperation = "source-over";
+    // readout describes what's drawn: the ridge's own frequency, not the pitch
+    // detector's guess, so the number always agrees with the picture
+    if (ridge * norm > 0.15) {
+      const hz = this._bwFreq(ridgeI / (B.RINGS - 1));
+      const midi = Math.round(69 + 12 * Math.log2(hz / 440));
+      const name = NOTE_NAMES[((midi % 12) + 12) % 12] + (Math.floor(midi / 12) - 1);
+      ctx.fillStyle = "rgba(215,230,255,0.8)";
+      ctx.font = "600 13px ui-monospace, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(`${Math.round(hz)} Hz  ·  ${name}`, W / 2, H - 26);
+      ctx.textAlign = "left";
+    }
+    ctx.fillStyle = "rgba(150,165,195,0.5)";
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.fillText(`${B.F_LO} Hz`, 14, H - 14);
+    ctx.textAlign = "right";
+    ctx.fillText(`${B.F_HI} Hz — centre`, W - 14, H - 14);
+    ctx.textAlign = "left";
   },
 
   // ---- pitch-roll: clean melodic contours of vocals + bass over time ----

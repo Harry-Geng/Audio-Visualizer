@@ -2333,6 +2333,33 @@ const Transport = {
     };
     return [avg(0, t), avg(t, 2 * t), avg(2 * t, buf.length)];
   },
+  // A private high-resolution analyser tapped off one stem. The shared analysers
+  // are fixed at 2048 points (level()/bands() read them with buffers sized for
+  // exactly that), which is only ~17 bins below 400 Hz — far too coarse to draw
+  // the bass spectrum. This hangs a finer analyser off the same signal, routed
+  // through a silent gain into master so the branch gets pulled by the
+  // destination like any other node. Re-taps itself when sources restart.
+  tapAnalyser(id, fftSize = 8192) {
+    const src = this.analysers[id];
+    if (!src) return null;
+    const cache = this._taps || (this._taps = {});
+    let t = cache[id];
+    if (!t || t.an.fftSize !== fftSize) {
+      if (t) { try { t.an.disconnect(); t.mute.disconnect(); } catch {} }
+      const an = this.ac.createAnalyser();
+      an.fftSize = fftSize; an.smoothingTimeConstant = 0.55;
+      const mute = this.ac.createGain(); mute.gain.value = 0;
+      t = cache[id] = { an, mute, src: null };
+    }
+    if (t.src && t.src !== src) { try { t.src.disconnect(t.an); } catch {} }
+    t.src = src;
+    // (Re)assert the edges on every call. Connections are idempotent, and this is
+    // the only reliable way to stay attached: a disconnect() anywhere upstream
+    // drops ALL of that node's outgoing edges, silently including this tap.
+    try { src.connect(t.an); t.an.connect(t.mute); t.mute.connect(this.master); }
+    catch { return null; }
+    return t.an;
+  },
   pitchHz(id) {                             // monophonic fundamental via autocorrelation
     const a = this.analysers[id]; if (!a) return 0;
     const N = a.fftSize, b = this._pf && this._pf.length === N ? this._pf : (this._pf = new Float32Array(N));
