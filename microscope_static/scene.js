@@ -668,9 +668,9 @@ const Scene = {
   // needs no depth sorting because everything composites as light.
   BW: {
     F_LO: 22, F_HI: 420,          // Hz mapped from the rim to the centre
-    RINGS: 44, SEG: 84, SPOKES: 24,
-    R_OUT: 2.45, R_IN: 0.22,      // world-space radii of the outermost/innermost ring
-    HEIGHT: 1.25, BASE_Y: -0.5,   // BASE_Y drops the disc so risen rings stay framed
+    RINGS: 72, SEG: 96,           // radial samples x angular samples of the sheet
+    R_OUT: 2.45, R_IN: 0.05,      // world-space radii of the outer edge / centre
+    HEIGHT: 1.25, BASE_Y: -0.5,   // BASE_Y drops the sheet so risen rims stay framed
     DB_LO: -76, DB_HI: -20,       // dB window: below LO is floor, above HI is full height
     mag: null, buf: null, peak: 0, ripple: 0,
   },
@@ -708,6 +708,16 @@ const Scene = {
         const e = clamp((db - B.DB_LO) / span, 0, 1);
         B.mag[i] = B.mag[i] * 0.6 + e * 0.4;
       }
+      // Smooth along the radius. Out at the rim a whole ring spans less than one
+      // FFT bin, so neighbouring rings read identical values and the sheet would
+      // step instead of flowing. A 1-2-1 pass makes the profile continuous.
+      if (!B.tmp || B.tmp.length !== B.RINGS) B.tmp = new Float32Array(B.RINGS);
+      const m = B.mag, tp = B.tmp;
+      for (let i = 0; i < B.RINGS; i++) {
+        const a = m[Math.max(0, i - 1)], c = m[i], b2 = m[Math.min(B.RINGS - 1, i + 1)];
+        tp[i] = (a + c * 2 + b2) * 0.25;
+      }
+      m.set(tp);
     }
     // gentle auto-gain: lifts quiet passages, never inflates already-loud ones
     let mx = 0, ridge = 0, ridgeI = 0;
@@ -719,9 +729,15 @@ const Scene = {
     const norm = 1 / Math.max(0.55, B.peak);
     B.ripple += this.dt * (0.9 + mx * norm * 2.2);          // undulation phase
 
-    // ---- geometry: ring i, angle j -> world point ----
+    // ---- geometry ----
+    // The angle array starts at -yaw so that j in [0, SEG/2] is exactly the half
+    // of the disc facing AWAY from the camera: depth works out to
+    // R·sin(a + yaw)·cos(pitch) + h·sin(pitch), so sin(a + yaw) > 0 is the far
+    // side. That split is what lets an opaque sheet paint in correct depth order
+    // (far half outward-in, then near half inward-out) without sorting anything.
     const pulse = 1 + f.beat * 0.035;
-    const pts = [];                                          // [ring][seg] projected
+    const a0 = -(this.yaw + this.autoYaw);
+    const rows = [];
     for (let i = 0; i < B.RINGS; i++) {
       const u = i / (B.RINGS - 1);
       const e = clamp(B.mag[i] * norm, 0, 1.6);
@@ -729,73 +745,74 @@ const Scene = {
       const h = Math.pow(e, 2.1) * B.HEIGHT;        // gamma: only real energy climbs
       const row = new Array(B.SEG + 1);
       for (let j = 0; j <= B.SEG; j++) {
-        const a = j / B.SEG * Math.PI * 2;
+        const a = a0 + j / B.SEG * Math.PI * 2;
         // two slow travelling waves, scaled by this ring's own energy, so the
-        // surface breathes instead of reading as perfect machined circles
+        // sheet breathes instead of reading as a machined solid of revolution
         const w = Math.sin(a * 3 + B.ripple * 1.3 + i * 0.22) * 0.5
                 + Math.sin(a * 5 - B.ripple * 0.8 + i * 0.11) * 0.5;
-        const hh = h * (1 + w * 0.22 * e);
-        row[j] = this.project([Math.cos(a) * R, B.BASE_Y + hh, Math.sin(a) * R], W, H);
+        row[j] = this.project([Math.cos(a) * R, B.BASE_Y + h * (1 + w * 0.22 * e),
+                               Math.sin(a) * R], W, H);
       }
-      pts.push({ row, e, u, R, h });
+      rows.push({ row, e, u, R, h });
     }
 
     // ---- draw ----
+    // an earlier style may have left the context additive; this one paints solid
+    ctx.globalCompositeOperation = "source-over";
     ctx.fillStyle = "#04050a"; ctx.fillRect(0, 0, W, H);
-    ctx.globalCompositeOperation = "lighter";
     ctx.lineJoin = "round";
 
-    // floor: the same rings flattened, as a faint ground plane to read height against
+    // faint ground plane, so height has something to be read against
     ctx.lineWidth = 1;
-    for (let i = 0; i < B.RINGS; i += 6) {
-      const R = (B.R_OUT + (B.R_IN - B.R_OUT) * (i / (B.RINGS - 1))) * pulse;
-      ctx.strokeStyle = "rgba(90,110,150,0.10)";
+    ctx.strokeStyle = "rgba(90,110,150,0.13)";
+    for (let k = 1; k <= 3; k++) {
+      const R = B.R_OUT * pulse * k / 3;
       ctx.beginPath();
       for (let j = 0; j <= B.SEG; j++) {
-        const a = j / B.SEG * Math.PI * 2;
+        const a = a0 + j / B.SEG * Math.PI * 2;
         const p = this.project([Math.cos(a) * R, B.BASE_Y, Math.sin(a) * R], W, H);
         j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
       }
       ctx.stroke();
     }
 
-    // spokes first (they sit under the rings and imply the surface between them)
-    for (let s = 0; s < B.SPOKES; s++) {
-      const j = Math.round(s / B.SPOKES * B.SEG);
-      ctx.strokeStyle = `rgba(120,150,210,${0.05 + 0.16 * clamp(mx * norm, 0, 1)})`;
-      ctx.lineWidth = 1;
+    // One filled band per adjacent pair of radial samples. Because the bands abut
+    // exactly and each is a single closed path, the result is a continuous sheet
+    // from the centre to the rim — no ring lines anywhere. Shading mixes the
+    // frequency ramp (ember rim -> cyan centre) with the radial slope, so a rising
+    // wall catches light and the surface reads as a lit solid rather than a stack.
+    const half = B.SEG >> 1;
+    const band = (i, jFrom, jTo) => {
+      const A = rows[i], Bd = rows[i + 1];
+      const slope = (Bd.h - A.h) * 2.2;             // >0 climbing toward the centre
+      const eAvg = (A.e + Bd.e) * 0.5;
+      const hue = 12 + ((A.u + Bd.u) * 0.5) * 190;
+      const shade = clamp(0.5 + slope, 0.18, 1.25);
+      const lum = clamp((16 + eAvg * 42) * shade, 6, 74);
+      const sat = 60 + Math.min(38, eAvg * 46);
+      const alpha = 0.72 + Math.min(0.28, eAvg * 0.4);
+      ctx.fillStyle = `hsla(${hue},${sat}%,${lum}%,${alpha})`;
       ctx.beginPath();
-      for (let i = 0; i < B.RINGS; i++) {
-        const p = pts[i].row[j];
-        i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
-      }
-      ctx.stroke();
-    }
+      ctx.moveTo(A.row[jFrom].x, A.row[jFrom].y);
+      for (let j = jFrom + 1; j <= jTo; j++) ctx.lineTo(A.row[j].x, A.row[j].y);
+      for (let j = jTo; j >= jFrom; j--) ctx.lineTo(Bd.row[j].x, Bd.row[j].y);
+      ctx.closePath(); ctx.fill();
+    };
+    // far half: the rim is the farthest thing on that side, so paint outward-in
+    for (let i = 0; i < B.RINGS - 1; i++) band(i, 0, half);
+    // near half: the centre is the farthest thing on this side, so paint inward-out
+    for (let i = B.RINGS - 2; i >= 0; i--) band(i, half, B.SEG);
 
-    // rings, coloured by frequency: ember at the rim -> cyan at the centre
-    for (let i = 0; i < B.RINGS; i++) {
-      const { row, e, u } = pts[i];
-      const hue = 12 + u * 190;
-      const lum = 44 + Math.min(46, e * 46);
-      const alpha = 0.20 + Math.min(0.75, e * 0.9);
-      ctx.strokeStyle = `hsla(${hue},92%,${lum}%,${alpha})`;
-      ctx.lineWidth = 1 + Math.min(3.4, e * 3.4);
-      ctx.beginPath();
-      for (let j = 0; j <= B.SEG; j++) {
-        const p = row[j];
-        j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
-      }
-      ctx.stroke();
-    }
-
-    // the loudest ring gets a bloom — this is the eye's anchor for "the note"
+    // glowing crest along the loudest radius — the eye's anchor for "the note".
+    // Split at the same seam and drawn after the sheet, so the near half of the
+    // crest sits on top while the far half stays tucked behind the rim.
     if (ridge * norm > 0.15) {
-      const { row, u } = pts[ridgeI];
+      const { row, u } = rows[ridgeI];
+      const hue = 12 + u * 190;
       ctx.save();
-      ctx.shadowColor = `hsla(${12 + u * 190},100%,66%,0.95)`;
-      ctx.shadowBlur = 22;
-      ctx.strokeStyle = `hsla(${12 + u * 190},100%,78%,${Math.min(0.95, ridge * norm)})`;
-      ctx.lineWidth = 2.2;
+      ctx.shadowColor = `hsla(${hue},100%,66%,0.9)`; ctx.shadowBlur = 18;
+      ctx.strokeStyle = `hsla(${hue},100%,82%,${Math.min(0.95, ridge * norm)})`;
+      ctx.lineWidth = 2;
       ctx.beginPath();
       for (let j = 0; j <= B.SEG; j++) {
         const p = row[j];
@@ -803,6 +820,19 @@ const Scene = {
       }
       ctx.stroke();
       ctx.restore();
+    }
+
+    // the rim edge, to keep the silhouette crisp against the background
+    {
+      const { row, e } = rows[0];
+      ctx.strokeStyle = `hsla(14,90%,${58 + e * 22}%,${0.35 + e * 0.5})`;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      for (let j = 0; j <= B.SEG; j++) {
+        const p = row[j];
+        j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+      }
+      ctx.stroke();
     }
 
     // the detected fundamental as a bright travelling marker on its own radius.
@@ -813,7 +843,7 @@ const Scene = {
       const u = this._bwU(this.bassHz);
       const R = (B.R_OUT + (B.R_IN - B.R_OUT) * u) * pulse;
       const a = B.ripple * 0.55;
-      const p = this.project([Math.cos(a) * R, B.BASE_Y + pts[Math.round(u * (B.RINGS - 1))].h + 0.06, Math.sin(a) * R], W, H);
+      const p = this.project([Math.cos(a) * R, B.BASE_Y + rows[Math.round(u * (B.RINGS - 1))].h + 0.06, Math.sin(a) * R], W, H);
       const rr = Math.max(2.5, 6 * p.scale);
       const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rr * 3);
       g.addColorStop(0, "rgba(255,255,255,0.95)");
