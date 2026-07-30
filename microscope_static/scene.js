@@ -671,10 +671,9 @@ const Scene = {
   // ---- bass well: the bass spectrum wrapped into a circle ----
   // Radius carries frequency — the lowest sub sits on the outer rim, the top of
   // the bass range at the centre — and each ring's energy lifts it off the
-  // floor. So WHERE the glowing ridge sits is the bass pitch and HOW TALL it
-  // stands is the level: a sub drop swells the rim, a walking line marches the
-  // ridge inward. Drawn as an additive polar wireframe (rings + spokes), which
-  // needs no depth sorting because everything composites as light.
+  // floor. So WHERE the ridge sits is the bass pitch and HOW TALL it stands is
+  // the level: a sub drop swells the rim, a walking line marches the ridge
+  // inward. Drawn as an opaque depth-sorted sheet with concentric contours.
   BW: {
     F_LO: 22, F_HI: 420,          // Hz mapped from the rim to the centre
     // RINGS x WEDGES is the fill count and dominates frame cost (~5us per fill).
@@ -836,7 +835,7 @@ const Scene = {
 
     for (const qd of quads) {
       const A = rows[qd.i];
-      let outer, inner;
+      let outer, inner, hue = 12, sat = 60, lineL = -1;
       if (qd.wall) {
         outer = rim.row; inner = floor;
         ctx.fillStyle = `hsl(12,62%,${clamp(9 + rim.e * 16, 5, 30)}%)`;
@@ -849,9 +848,14 @@ const Scene = {
         // a flat coloured disc. tanh keeps a near-vertical wall from clipping.
         const shade = clamp(0.42 + 0.58 * Math.tanh((Bd.h - A.h) / dr * 0.45), 0.12, 1);
         const eAvg = (A.e + Bd.e) * 0.5;
-        const hue = 12 + ((A.u + Bd.u) * 0.5) * 190;
-        const sat = 58 + Math.min(40, eAvg * 48);
-        ctx.fillStyle = `hsl(${hue},${sat}%,${clamp((12 + eAvg * 34) * (0.45 + shade), 4, 70)}%)`;
+        hue = 12 + ((A.u + Bd.u) * 0.5) * 190;
+        sat = 58 + Math.min(40, eAvg * 48);
+        const fillL = clamp((12 + eAvg * 34) * (0.45 + shade), 4, 70);
+        ctx.fillStyle = `hsl(${hue},${sat}%,${fillL}%)`;
+        // Contour brightness is RELATIVE to the fill it sits on, and fades out
+        // with energy. A fixed floor meant that on a quiet or still surface the
+        // lines sat ~30% over a ~10% fill and became the whole picture.
+        if (eAvg > 0.07) lineL = clamp(fillL + 4 + eAvg * 20, 5, 82);
       }
       // Fills run one segment past the wedge so neighbours overlap. Two exactly
       // abutting antialiased paths leave a hairline gap along the shared edge,
@@ -871,8 +875,8 @@ const Scene = {
       // Opaque, and overlapping by a segment like the fills. Translucent arcs
       // would double-expose where neighbours meet, printing a bright dot at every
       // wedge join — which is the same radial striping the fills had.
-      if (!qd.wall && (qd.i & 1) === 0) {
-        ctx.strokeStyle = `hsl(${12 + A.u * 190},92%,${clamp(30 + A.e * 34, 24, 66)}%)`;
+      if (lineL >= 0 && (qd.i & 1) === 0) {
+        ctx.strokeStyle = `hsl(${hue},${sat}%,${lineL}%)`;
         ctx.beginPath();
         ctx.moveTo(outer[qd.jF].x, outer[qd.jF].y);
         for (let j = qd.jF + 1; j <= jFill; j++) ctx.lineTo(outer[j].x, outer[j].y);
@@ -880,27 +884,10 @@ const Scene = {
       }
     }
 
-    // Glowing crest on the loudest ring — the eye's anchor for "the note". Only
-    // the near half is stroked (j from SEG/2, measured from the seam that faces
-    // away from the camera): a full circle would draw its far half over the near
-    // wall, and a bright line crossing solid geometry is what reads as
-    // see-through. Behind the rim there is nothing to anchor anyway.
-    if (ridge * norm > 0.15) {
-      const { row, u } = rows[ridgeI];
-      const hue = 12 + u * 190;
-      const seam = Math.round((((-(this.yaw + this.autoYaw) - a0) / (Math.PI * 2)) % 1 + 1) % 1 * B.SEG);
-      ctx.save();
-      ctx.shadowColor = `hsla(${hue},100%,66%,0.9)`; ctx.shadowBlur = 18;
-      ctx.strokeStyle = `hsla(${hue},100%,82%,${Math.min(0.95, ridge * norm)})`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (let n = 0; n <= B.SEG >> 1; n++) {
-        const p = row[(seam + (B.SEG >> 1) + n) % B.SEG];
-        n ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
-      }
-      ctx.stroke();
-      ctx.restore();
-    }
+    // No separate crest highlight. Drawn as a full circle it showed through the
+    // near wall; drawn as half a circle it cut the disc in two and shaded one
+    // side. The ridge already announces itself — its contour is the brightest
+    // one, because contour lightness tracks that ring's own energy.
 
     ctx.globalCompositeOperation = "source-over";
     // readout describes what's drawn: the ridge's own frequency, not the pitch
