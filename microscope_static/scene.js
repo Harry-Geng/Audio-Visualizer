@@ -682,17 +682,15 @@ const Scene = {
     // wedge's outer edge still follows SEG/WEDGES segments. WEDGES must divide SEG.
     RINGS: 40, SEG: 96, WEDGES: 16,
     R_OUT: 2.45, R_IN: 0.05,      // world-space radii of the outer edge / centre
-    HEIGHT: 1.25, BASE_Y: -0.5,   // BASE_Y drops the sheet so risen rims stay framed
+    HEIGHT: 1.05, BASE_Y: -0.45,  // BASE_Y drops the sheet so risen rims stay framed
+    GAMMA: 1.4,                   // >1 exaggerates peaks; near 1 keeps the profile gentle
+    SMOOTH: 3,                    // radial 1-2-1 passes — more means rounder hills
     DB_LO: -76, DB_HI: -20,       // dB window: below LO is floor, above HI is full height
     mag: null, buf: null, peak: 0, ripple: 0,
   },
 
-  // ring index (0 = rim) -> centre frequency, and the inverse
+  // ring position (0 = rim) -> its centre frequency
   _bwFreq(u) { const B = this.BW; return B.F_LO * Math.pow(B.F_HI / B.F_LO, u); },
-  _bwU(hz) {
-    const B = this.BW;
-    return clamp(Math.log(hz / B.F_LO) / Math.log(B.F_HI / B.F_LO), 0, 1);
-  },
 
   renderBassWell(ctx, W, H, f) {
     const B = this.BW;
@@ -718,18 +716,21 @@ const Scene = {
         for (let b = lo; b < hi && b < bins; b++)   // reads as a ridge, not a smear
           if (B.buf[b] > db) db = B.buf[b];
         const e = clamp((db - B.DB_LO) / span, 0, 1);
-        B.mag[i] = B.mag[i] * 0.6 + e * 0.4;
+        B.mag[i] = B.mag[i] * 0.72 + e * 0.28;      // temporal ease
       }
       // Smooth along the radius. Out at the rim a whole ring spans less than one
       // FFT bin, so neighbouring rings read identical values and the sheet would
-      // step instead of flowing. A 1-2-1 pass makes the profile continuous.
+      // step instead of flowing. Repeated 1-2-1 passes round the hills off; each
+      // pass widens the kernel, so SMOOTH is the "how gentle" dial.
       if (!B.tmp || B.tmp.length !== B.RINGS) B.tmp = new Float32Array(B.RINGS);
       const m = B.mag, tp = B.tmp;
-      for (let i = 0; i < B.RINGS; i++) {
-        const a = m[Math.max(0, i - 1)], c = m[i], b2 = m[Math.min(B.RINGS - 1, i + 1)];
-        tp[i] = (a + c * 2 + b2) * 0.25;
+      for (let pass = 0; pass < B.SMOOTH; pass++) {
+        for (let i = 0; i < B.RINGS; i++) {
+          const a = m[Math.max(0, i - 1)], c = m[i], b2 = m[Math.min(B.RINGS - 1, i + 1)];
+          tp[i] = (a + c * 2 + b2) * 0.25;
+        }
+        m.set(tp);
       }
-      m.set(tp);
     }
     // gentle auto-gain: lifts quiet passages, never inflates already-loud ones
     let mx = 0, ridge = 0, ridgeI = 0;
@@ -750,15 +751,18 @@ const Scene = {
       const u = i / (B.RINGS - 1);
       const e = clamp(B.mag[i] * norm, 0, 1.6);
       const R = (B.R_OUT + (B.R_IN - B.R_OUT) * u) * pulse;
-      const h = Math.pow(e, 2.1) * B.HEIGHT;        // gamma: only real energy climbs
-      const row = new Array(B.SEG + 1);
-      for (let j = 0; j <= B.SEG; j++) {
+      const h = Math.pow(e, B.GAMMA) * B.HEIGHT;
+      // SEG+2 samples, not SEG+1: index SEG repeats index 0 to close the ring, and
+      // SEG+1 gives the final wedge somewhere to overlap into across the wrap —
+      // otherwise that one seam keeps its antialiasing hairline
+      const row = new Array(B.SEG + 2);
+      for (let j = 0; j <= B.SEG + 1; j++) {
         const a = a0 + j / B.SEG * Math.PI * 2;
         // two slow travelling waves, scaled by this ring's own energy, so the
         // sheet breathes instead of reading as a machined solid of revolution
         const w = Math.sin(a * 3 + B.ripple * 1.3 + i * 0.22) * 0.5
                 + Math.sin(a * 5 - B.ripple * 0.8 + i * 0.11) * 0.5;
-        row[j] = proj([Math.cos(a) * R, B.BASE_Y + h * (1 + w * 0.22 * e), Math.sin(a) * R]);
+        row[j] = proj([Math.cos(a) * R, B.BASE_Y + h * (1 + w * 0.13 * e), Math.sin(a) * R]);
       }
       rows.push({ row, e, u, R, h });
     }
@@ -791,45 +795,51 @@ const Scene = {
     // The outer wall, dropped from the rim to the floor. Without it the sheet is
     // a membrane floating over an unrelated ellipse; with it the whole thing is
     // one solid vessel, which is most of what sells the space as 3D.
-    const rim = rows[0], floor = new Array(B.SEG + 1);
-    for (let j = 0; j <= B.SEG; j++) {
+    const rim = rows[0], floor = new Array(B.SEG + 2);
+    for (let j = 0; j <= B.SEG + 1; j++) {
       const a = a0 + j / B.SEG * Math.PI * 2;
       floor[j] = proj([Math.cos(a) * rim.R, B.BASE_Y, Math.sin(a) * rim.R]);
     }
 
     // Split the sheet into wedges and paint them far-to-near — a plain painter's
-    // sort. Doing depth per PATCH rather than per half-circle is what fixes two
-    // things at once: brightness now varies smoothly around the rim instead of
-    // showing a hard seam where two flat-shaded halves met, and the ordering is
-    // correct at any camera angle instead of relying on a hand-derived rule about
-    // which half is farther. ~1400 small fills, still trivially cheap.
+    // sort, correct at any camera angle. Brightness is deliberately uniform
+    // AROUND each ring: a per-wedge value (aerial perspective, say) differs
+    // slightly between neighbours and paints the wedge boundaries as radial
+    // seams, which is worse than the depth cue is worth. Depth reads from the
+    // ring contours and the shading instead.
     const dr = (B.R_OUT - B.R_IN) / (B.RINGS - 1);
     const span = B.SEG / B.WEDGES;
+    const yawT = this.yaw + this.autoYaw;
     const quads = [];
     for (let k = 0; k < B.WEDGES; k++) {
       const jF = k * span, jT = jF + span, jM = jF + (span >> 1);
-      for (let i = 0; i < B.RINGS - 1; i++) {
-        const A = rows[i], Bd = rows[i + 1];
-        quads.push({ i, jF, jT,
-                     d: (A.row[jM].z + Bd.row[jM].z) * 0.5,
-                     s: (A.row[jM].scale + Bd.row[jM].scale) * 0.5, wall: false });
-      }
-      quads.push({ i: 0, jF, jT, d: (rim.row[jM].z + floor[jM].z) * 0.5 + 0.02,
-                   s: rim.row[jM].scale, wall: true });
+      for (let i = 0; i < B.RINGS - 1; i++)
+        quads.push({ i, jF, jT, d: (rows[i].row[jM].z + rows[i + 1].row[jM].z) * 0.5, wall: false });
+    }
+    // Backface-cull the wall. It's a single-sided band at the outer radius whose
+    // normal is radial, so the half with sin(a + yaw) > 0 faces away and is never
+    // visible — the sheet's outer edge IS the rim, so you can't see the inside of
+    // it. Drawn anyway, those quads go nearly edge-on at the sides where one depth
+    // key per quad mis-sorts, and they punched dark wedges through the sheet. The
+    // wall keys off its TOP edge unbiased; averaging in the floor point pushed the
+    // near wall behind the sheet, which is what made the rim look see-through.
+    // The wall is culled per SEGMENT rather than per wedge. A wedge straddling the
+    // boundary is part back-facing, so it has to be dropped whole — and at 22.5
+    // degrees that left a visible notch in the silhouette. One segment is 3.75
+    // degrees, where the wall is edge-on and the cut cannot be seen.
+    for (let j = 0; j < B.SEG; j++) {
+      const aF = a0 + j / B.SEG * Math.PI * 2, aT = a0 + (j + 1) / B.SEG * Math.PI * 2;
+      if (Math.sin(aF + yawT) < 0 && Math.sin(aT + yawT) < 0)
+        quads.push({ i: 0, jF: j, jT: j + 1, d: rim.row[j].z, wall: true });
     }
     quads.sort((p, q) => q.d - p.d);                 // farthest first
 
     for (const qd of quads) {
       const A = rows[qd.i];
-      // aerial perspective: project() hands back camD/depth, so scale IS the
-      // depth cue, already perspective-correct
-      // gentle range on purpose: fog is flat per wedge, so a steep curve would
-      // show the 22.5-degree facets as brightness steps around the rim
-      const fog = clamp(0.58 + (qd.s - 0.85) * 0.85, 0.5, 1.14);
       let outer, inner;
       if (qd.wall) {
         outer = rim.row; inner = floor;
-        ctx.fillStyle = `hsl(14,55%,${clamp((7 + rim.e * 14) * fog, 3, 27)}%)`;
+        ctx.fillStyle = `hsl(12,62%,${clamp(9 + rim.e * 16, 5, 30)}%)`;
       } else {
         const Bd = rows[qd.i + 1];
         outer = A.row; inner = Bd.row;
@@ -841,63 +851,55 @@ const Scene = {
         const eAvg = (A.e + Bd.e) * 0.5;
         const hue = 12 + ((A.u + Bd.u) * 0.5) * 190;
         const sat = 58 + Math.min(40, eAvg * 48);
-        ctx.fillStyle = `hsl(${hue},${sat}%,${clamp((12 + eAvg * 34) * (0.45 + shade) * fog, 4, 76)}%)`;
+        ctx.fillStyle = `hsl(${hue},${sat}%,${clamp((12 + eAvg * 34) * (0.45 + shade), 4, 70)}%)`;
       }
+      // Fills run one segment past the wedge so neighbours overlap. Two exactly
+      // abutting antialiased paths leave a hairline gap along the shared edge,
+      // which showed up as faint vertical lines down the wall. Same colour and
+      // painted far-to-near, so the overlap is invisible.
+      const jFill = qd.jT + 1;
       ctx.beginPath();
       ctx.moveTo(outer[qd.jF].x, outer[qd.jF].y);
-      for (let j = qd.jF + 1; j <= qd.jT; j++) ctx.lineTo(outer[j].x, outer[j].y);
-      for (let j = qd.jT; j >= qd.jF; j--) ctx.lineTo(inner[j].x, inner[j].y);
+      for (let j = qd.jF + 1; j <= jFill; j++) ctx.lineTo(outer[j].x, outer[j].y);
+      for (let j = jFill; j >= qd.jF; j--) ctx.lineTo(inner[j].x, inner[j].y);
       ctx.closePath(); ctx.fill();
+
+      // Concentric contour on this patch's outer edge. Stroked inside the sorted
+      // pass, not as full circles afterwards, so a far-side line stays hidden
+      // behind the near wall instead of showing through it. Only the arc is
+      // stroked — never the radial edges — so no vertical seams appear.
+      // Opaque, and overlapping by a segment like the fills. Translucent arcs
+      // would double-expose where neighbours meet, printing a bright dot at every
+      // wedge join — which is the same radial striping the fills had.
+      if (!qd.wall && (qd.i & 1) === 0) {
+        ctx.strokeStyle = `hsl(${12 + A.u * 190},92%,${clamp(30 + A.e * 34, 24, 66)}%)`;
+        ctx.beginPath();
+        ctx.moveTo(outer[qd.jF].x, outer[qd.jF].y);
+        for (let j = qd.jF + 1; j <= jFill; j++) ctx.lineTo(outer[j].x, outer[j].y);
+        ctx.stroke();
+      }
     }
 
-    // glowing crest along the loudest radius — the eye's anchor for "the note".
-    // Split at the same seam and drawn after the sheet, so the near half of the
-    // crest sits on top while the far half stays tucked behind the rim.
+    // Glowing crest on the loudest ring — the eye's anchor for "the note". Only
+    // the near half is stroked (j from SEG/2, measured from the seam that faces
+    // away from the camera): a full circle would draw its far half over the near
+    // wall, and a bright line crossing solid geometry is what reads as
+    // see-through. Behind the rim there is nothing to anchor anyway.
     if (ridge * norm > 0.15) {
       const { row, u } = rows[ridgeI];
       const hue = 12 + u * 190;
+      const seam = Math.round((((-(this.yaw + this.autoYaw) - a0) / (Math.PI * 2)) % 1 + 1) % 1 * B.SEG);
       ctx.save();
       ctx.shadowColor = `hsla(${hue},100%,66%,0.9)`; ctx.shadowBlur = 18;
       ctx.strokeStyle = `hsla(${hue},100%,82%,${Math.min(0.95, ridge * norm)})`;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      for (let j = 0; j <= B.SEG; j++) {
-        const p = row[j];
-        j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+      for (let n = 0; n <= B.SEG >> 1; n++) {
+        const p = row[(seam + (B.SEG >> 1) + n) % B.SEG];
+        n ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
       }
       ctx.stroke();
       ctx.restore();
-    }
-
-    // the rim edge, to keep the silhouette crisp against the background
-    {
-      const { row, e } = rows[0];
-      ctx.strokeStyle = `hsla(14,90%,${58 + e * 22}%,${0.35 + e * 0.5})`;
-      ctx.lineWidth = 1.4;
-      ctx.beginPath();
-      for (let j = 0; j <= B.SEG; j++) {
-        const p = row[j];
-        j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
-      }
-      ctx.stroke();
-    }
-
-    // the detected fundamental as a bright travelling marker on its own radius.
-    // Gated to a plausible bass register: the autocorrelation detector octave-
-    // slips on dense low end, and a marker parked at the centre would read as
-    // "the bass is at 280 Hz" while the ridge plainly says otherwise.
-    if (this.bassHz > B.F_LO && this.bassHz < 220) {
-      const u = this._bwU(this.bassHz);
-      const R = (B.R_OUT + (B.R_IN - B.R_OUT) * u) * pulse;
-      const a = B.ripple * 0.55;
-      const p = proj([Math.cos(a) * R, B.BASE_Y + rows[Math.round(u * (B.RINGS - 1))].h + 0.06, Math.sin(a) * R]);
-      const rr = Math.max(2.5, 6 * p.scale);
-      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rr * 3);
-      g.addColorStop(0, "rgba(255,255,255,0.95)");
-      g.addColorStop(0.35, "rgba(180,220,255,0.5)");
-      g.addColorStop(1, "rgba(180,220,255,0)");
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(p.x, p.y, rr * 3, 0, Math.PI * 2); ctx.fill();
     }
 
     ctx.globalCompositeOperation = "source-over";
